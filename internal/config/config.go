@@ -168,6 +168,13 @@ type Config struct {
 	Logging Logging `yaml:"logging,omitempty" json:"logging,omitempty"`
 }
 
+// Default returns the empty in-memory config used when no config file
+// exists yet (first boot): default listen address, no keys, no channels.
+// The web setup wizard turns this into a real file on first save.
+func Default() *Config {
+	return &Config{Server: Server{Listen: ":8787"}, Channels: []Channel{}}
+}
+
 func Load(path string) (*Config, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

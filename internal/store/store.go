@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -31,7 +32,13 @@ const reloadCheckInterval = 500 * time.Millisecond
 func NewStore(path string) (*Store, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
-		return nil, err
+		// A missing config file is not fatal: the server starts with an
+		// empty default config so the web setup wizard (/admin/setup) can
+		// create it. Parse errors on an EXISTING file still abort startup.
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		cfg = config.Default()
 	}
 	store := &Store{path: path, cfg: cfg}
 	if info, err := os.Stat(path); err == nil {
@@ -125,6 +132,37 @@ func (s *Store) SetKeyStrategy(strategy string) error {
 		return fmt.Errorf("unsupported key_strategy %q (allowed: round_robin, preferred_first)", strategy)
 	}
 	s.cfg.Server.KeyStrategy = strategy
+	return s.saveLocked()
+}
+
+// ApplySetup performs first-boot initialization in a single mutation: the
+// admin key (required), the client API key (optional) and the first channel
+// (optional, validated before anything is written). It refuses to run once
+// an admin key exists, which is what closes the setup wizard after use.
+func (s *Store) ApplySetup(adminKey, apiKey string, channel *config.Channel) error {
+	adminKey = strings.TrimSpace(adminKey)
+	if adminKey == "" {
+		return fmt.Errorf("admin_key is required")
+	}
+	if channel != nil {
+		if err := config.ValidateChannel(channel); err != nil {
+			return err
+		}
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cfg.Server.AdminKey != "" {
+		return fmt.Errorf("setup already completed")
+	}
+	s.cfg.Server.AdminKey = adminKey
+	s.cfg.Server.APIKey = strings.TrimSpace(apiKey)
+	if channel != nil {
+		if s.indexOfLocked(channel.Name) >= 0 {
+			return fmt.Errorf("channel %q already exists", channel.Name)
+		}
+		s.cfg.Channels = append(s.cfg.Channels, cloneChannel(*channel))
+	}
 	return s.saveLocked()
 }
 

@@ -27,6 +27,8 @@ func NewServer(cfgStore *store.Store, handler *relay.Handler, collector *stats.C
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/admin/", s.serveConsole)
+	mux.HandleFunc("/admin/setup", s.serveSetup)
+	mux.HandleFunc("/admin/api/setup", s.handleSetup)
 	mux.HandleFunc("/admin/api/status", s.handleStatus)
 	mux.HandleFunc("/admin/api/server", s.handleServer)
 	mux.HandleFunc("/admin/api/key-strategy", s.handleKeyStrategy)

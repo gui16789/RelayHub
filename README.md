@@ -49,6 +49,24 @@ go run ./cmd/headless
 > 请在 config.yaml 设置 `server.admin_key`，远程请求携带
 > `Authorization: Bearer <admin_key>` 方可访问。
 
+### 3. 服务器部署（Docker）
+
+无头模式可直接部署到 Linux 服务器，对外提供统一的
+`base_url`（`https://你的域名/v1`）和 `api_key`，渠道的上游
+base_url / api_keys 全部在网页管理台中配置：
+
+```bash
+mkdir -p data
+docker compose up -d --build
+# 浏览器打开 http://服务器:8787/admin/setup 完成首次初始化
+# （设置 admin_key / api_key / 第一个渠道，随后引导页自动关闭）
+```
+
+客户端填 `https://你的域名/v1` + `server.api_key` 即可使用；
+管理台 `https://你的域名/admin/`（Bearer `server.admin_key`）。
+HTTPS 反代（Caddy/Nginx）、安全清单与 FAQ 详见
+[docs/deploy-server.md](docs/deploy-server.md)。
+
 ---
 
 ## 配置详解

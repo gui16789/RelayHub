@@ -1,0 +1,18 @@
+services:
+  relayhub:
+    build: .
+    image: relayhub:latest
+    container_name: relayhub
+    restart: unless-stopped
+    ports:
+      # 仅配合反代（Caddy/Nginx）使用时可改为 127.0.0.1:8787:8787，
+      # 由反代对外提供 HTTPS。
+      - "8787:8787"
+    volumes:
+      # config.yaml、stats.json、cooldowns.json 都持久化在这个目录。
+      - ./data:/data
+    environment:
+      # 用环境变量覆盖 config.yaml 中的密钥（config 支持 ${ENV_VAR} 引用）。
+      # - ADMIN_KEY=change-me
+      # - API_KEY=sk-my-proxy-secret
+      - TZ=Asia/Shanghai

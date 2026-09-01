@@ -1,0 +1,15 @@
+.git
+.github
+.gocache
+.gopath
+build
+*.exe
+*.log
+config.yaml
+config.test.yaml
+stats.json
+cooldowns.json
+docs
+node_modules
+frontend/node_modules
+frontend/dist

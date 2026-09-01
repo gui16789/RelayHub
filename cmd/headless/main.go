@@ -53,6 +53,10 @@ func main() {
 		"listen", snapshot.Server.Listen,
 		"channels", len(snapshot.Channels),
 		"console", "http://localhost"+listenDisplay(snapshot.Server.Listen)+"/admin/")
+	if snapshot.Server.AdminKey == "" {
+		slog.Warn("admin_key not set: console is loopback-only; remote users can finish first-boot setup",
+			"setup", "http://<server>"+listenDisplay(snapshot.Server.Listen)+"/admin/setup")
+	}
 
 	httpServer := &http.Server{Addr: snapshot.Server.Listen, Handler: service}
 	go func() {

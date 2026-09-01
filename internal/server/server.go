@@ -63,7 +63,11 @@ func New(cfgStore *store.Store) *Service {
 	mux.Handle("/admin/", adminServer.Mux())
 	mux.HandleFunc("/", func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/" {
-			http.Redirect(writer, request, "/admin/", http.StatusFound)
+			target := "/admin/"
+			if cfgStore.Snapshot().Server.AdminKey == "" && !isLoopback(request.RemoteAddr) {
+				target = "/admin/setup"
+			}
+			http.Redirect(writer, request, target, http.StatusFound)
 			return
 		}
 		http.NotFound(writer, request)
@@ -140,8 +144,21 @@ func authMiddleware(cfgStore *store.Store, next http.Handler) http.Handler {
 				next.ServeHTTP(writer, request)
 				return
 			}
+			// First-boot wizard: with no admin_key configured the console is
+			// unreachable remotely, so /admin/setup (and only it) stays open
+			// to let the very first admin initialize the keys. The wizard
+			// closes itself by setting admin_key.
+			if snapshot.Server.AdminKey == "" &&
+				(request.URL.Path == "/admin/setup" || request.URL.Path == "/admin/api/setup") {
+				next.ServeHTTP(writer, request)
+				return
+			}
 			if snapshot.Server.AdminKey != "" && constantTimeEqual(provided, snapshot.Server.AdminKey) {
 				next.ServeHTTP(writer, request)
+				return
+			}
+			if snapshot.Server.AdminKey == "" {
+				http.Error(writer, "admin console not initialized: open /admin/setup to complete first-boot setup", http.StatusForbidden)
 				return
 			}
 			http.Error(writer, "admin console requires loopback access or server.admin_key", http.StatusForbidden)
