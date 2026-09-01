@@ -43,6 +43,7 @@ type anthropicResponse struct {
 
 func (h *Handler) relayAnthropic(
 	writer http.ResponseWriter,
+	clientRequest *http.Request,
 	body []byte,
 	attempt attempt,
 ) attemptResult {
@@ -56,7 +57,10 @@ func (h *Handler) relayAnthropic(
 		return attemptResult{outcome: outcomeAborted, err: err}
 	}
 
-	upstreamRequest, err := http.NewRequest(
+	// Carry the client's context: streamClient has no total timeout, so
+	// without cancellation a client that hangs up mid-stream leaves the
+	// upstream generating (and billing) until it finishes on its own.
+	upstreamRequest, err := http.NewRequestWithContext(clientRequest.Context(),
 		http.MethodPost, attempt.channel.BaseURL+"/v1/messages", bytes.NewReader(mustJSON(upstreamPayload)))
 	if err != nil {
 		return attemptResult{outcome: outcomeFailed, err: err}
@@ -231,8 +235,8 @@ func streamAnthropicToOpenAI(
 		}
 
 		var event struct {
-			Type  string `json:"type"`
-			Delta json.RawMessage `json:"delta"`
+			Type    string          `json:"type"`
+			Delta   json.RawMessage `json:"delta"`
 			Message *struct {
 				Usage struct {
 					InputTokens int `json:"input_tokens"`

@@ -67,9 +67,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Read the version from go.mod so the toolchain can never drift from
+      # what the module actually requires.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
           cache: true
 
       - uses: actions/setup-node@v4
@@ -95,6 +97,14 @@ jobs:
             echo "buildtype=headless" >> "$GITHUB_OUTPUT"
           fi
           echo "ldflags=-s -w -X github.com/local/relayhub/internal/version.Version=$VER -X github.com/local/relayhub/internal/version.Commit=$COMMIT -X github.com/local/relayhub/internal/version.BuildTime=$BUILDTIME" >> "$GITHUB_OUTPUT"
+
+      # Wails v2.15.0's darwin frontend references UTType without linking the
+      # framework that defines it. Recent macOS SDKs no longer pull it in
+      # implicitly, so the link fails with an undefined _OBJC_CLASS_$_UTType.
+      # Supply it here until the dependency is upgraded.
+      - name: Set macOS link flags
+        if: matrix.desktop && matrix.goos == 'darwin'
+        run: echo "CGO_LDFLAGS=-framework UniformTypeIdentifiers" >> "$GITHUB_ENV"
 
       # ── Desktop (Wails) build ────────────────────────────────────────
       - name: Build desktop (Wails)
@@ -128,8 +138,10 @@ jobs:
         run: |
           EXT=""
           [ "$GOOS" = "windows" ] && EXT=".exe"
+          # No -H windowsgui here: the headless binary is a console program.
+          # Detaching it from the console would hide its log output and stop
+          # it from receiving Ctrl+C, which is its whole shutdown path.
           LDFLAGS="${{ steps.meta.outputs.ldflags }}"
-          [ "$GOOS" = "windows" ] && LDFLAGS="-H windowsgui $LDFLAGS"
           go build -tags=production \
             -ldflags "$LDFLAGS" \
             -o "relayhub-headless-${GOOS}-${GOARCH}${EXT}" \

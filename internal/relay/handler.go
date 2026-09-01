@@ -137,18 +137,43 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	// an embeddings/images/responses payload through the anthropic/gemini
 	// chat converters would produce garbage.
 	openAIOnly := request.URL.Path != "/v1/chat/completions"
+	// Likewise for chat requests using features the converters cannot express
+	// (tools, vision parts, response_format, n>1). Restricting them to
+	// passthrough channels keeps the request honest: it either reaches an
+	// upstream that truly supports the feature, or it fails with a message
+	// naming what is unsupported, instead of returning 200 and a reply that
+	// quietly ignored half the request.
+	unsupported := parsed.unsupportedFeatures()
+	if len(unsupported) > 0 {
+		openAIOnly = true
+	}
 	attempts := h.buildAttempts(snapshot, parsed.Model, openAIOnly)
 	if max := snapshot.Server.MaxAttempts; max > 0 && len(attempts) > max {
 		slog.Info("attempts capped", "model", parsed.Model, "candidates", len(attempts), "max", max)
 		attempts = attempts[:max]
 	}
 	if len(attempts) == 0 {
-		if len(snapshot.CandidateChannels(parsed.Model)) == 0 {
+		candidates := snapshot.CandidateChannels(parsed.Model)
+		if len(candidates) == 0 {
 			// Genuinely no enabled channel declares this model: a config gap,
 			// not a transient failure, so 404.
 			h.stats.RecordUnrouted(parsed.Model)
 			finishTrace(http.StatusNotFound, "")
 			http.Error(writer, fmt.Sprintf("no channel serves model %q", parsed.Model), http.StatusNotFound)
+			return
+		}
+		// Channels serve this model, but the request needs features only a
+		// passthrough channel can carry and none of them is one. That is a
+		// property of the request, so say so plainly rather than letting it
+		// fall through to the retryable 503 below.
+		if len(unsupported) > 0 && !hasOpenAIChannel(candidates) {
+			features := strings.Join(unsupported, ", ")
+			h.stats.RecordUnconvertible(parsed.Model, features)
+			finishTrace(http.StatusBadRequest, "")
+			http.Error(writer, fmt.Sprintf(
+				"request uses %s, which cannot be converted to the %q protocol; "+
+					"route model %q through a channel of type openai to use it",
+				features, candidates[0].Type, parsed.Model), http.StatusBadRequest)
 			return
 		}
 		// Channels exist for the model but none is usable right now: either
@@ -228,6 +253,17 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	slog.Error("all attempts failed", "model", parsed.Model, "attempts", len(attempts))
 	finishTrace(http.StatusBadGateway, "")
 	http.Error(writer, "all upstream attempts failed, last error: "+errText(lastErr), http.StatusBadGateway)
+}
+
+// hasOpenAIChannel reports whether any candidate passes requests through
+// verbatim, which is what an unconvertible feature requires.
+func hasOpenAIChannel(channels []config.Channel) bool {
+	for _, channel := range channels {
+		if channel.Type == config.TypeOpenAI {
+			return true
+		}
+	}
+	return false
 }
 
 func hopResult(outcome outcomeKind) string {
@@ -377,9 +413,9 @@ func (h *Handler) tryAttempt(
 	case config.TypeOpenAI:
 		return h.relayOpenAI(writer, request, body, attempt)
 	case config.TypeAnthropic:
-		return h.relayAnthropic(writer, body, attempt)
+		return h.relayAnthropic(writer, request, body, attempt)
 	case config.TypeGemini:
-		return h.relayGemini(writer, body, attempt)
+		return h.relayGemini(writer, request, body, attempt)
 	default:
 		return attemptResult{outcome: outcomeFailed, err: fmt.Errorf("unknown channel type %q", attempt.channel.Type)}
 	}

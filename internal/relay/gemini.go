@@ -50,6 +50,7 @@ type geminiResponse struct {
 
 func (h *Handler) relayGemini(
 	writer http.ResponseWriter,
+	clientRequest *http.Request,
 	body []byte,
 	attempt attempt,
 ) attemptResult {
@@ -66,7 +67,11 @@ func (h *Handler) relayGemini(
 	}
 	upstreamURL := fmt.Sprintf("%s/v1beta/models/%s%s", attempt.channel.BaseURL, attempt.upstreamModel, action)
 
-	upstreamRequest, err := http.NewRequest(http.MethodPost, upstreamURL, bytes.NewReader(mustJSON(upstreamPayload)))
+	// Carry the client's context: streamClient has no total timeout, so
+	// without cancellation a client that hangs up mid-stream leaves the
+	// upstream generating (and billing) until it finishes on its own.
+	upstreamRequest, err := http.NewRequestWithContext(clientRequest.Context(),
+		http.MethodPost, upstreamURL, bytes.NewReader(mustJSON(upstreamPayload)))
 	if err != nil {
 		return attemptResult{outcome: outcomeFailed, err: err}
 	}
@@ -128,10 +133,14 @@ func (h *Handler) relayGemini(
 
 func buildGeminiRequest(request chatRequest) *geminiRequest {
 	result := &geminiRequest{}
+	// Only forward a token cap the client actually asked for. Gemini does not
+	// require maxOutputTokens and defaults to the model's own limit, so
+	// substituting Anthropic's mandatory-field default here would silently
+	// truncate generations at 4096 tokens. omitempty drops the zero value.
 	generationConfig := &geminiGenConfig{
 		Temperature:     request.Temperature,
 		TopP:            request.TopP,
-		MaxOutputTokens: request.effectiveMaxTokens(),
+		MaxOutputTokens: request.requestedMaxTokens(),
 	}
 	switch stops := request.Stop.(type) {
 	case string:

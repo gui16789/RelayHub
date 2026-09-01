@@ -7,6 +7,20 @@
 ### Added
 - 服务器部署支持：多阶段 `Dockerfile`（非 root、健康检查、`/data` 卷持久化）、`docker-compose.yml` 与部署文档 `docs/deploy-server.md`（含 Caddy / Nginx HTTPS 反代示例与安全清单）
 - 首次启动网页引导：配置文件缺失时以默认配置启动，`/admin/setup` 提供初始化向导（设置 admin_key / api_key / 第一个渠道），仅当 admin_key 未设置时对远程开放，初始化完成后自动关闭并回到常规鉴权
+- CI 流水线 `.github/workflows/ci.yml`：push / PR 上跑 `go vet`、`gofmt`、`go test -race`、`go mod verify`，并交叉编译全部发布目标 + 构建 Docker 镜像（此前只有打 tag 时的 release 工作流，测试从不在合并前运行）
+
+### Fixed
+- **`.gitignore` 的 `go.*` 规则把 `go.mod` / `go.sum` 一起排除了**，导致全新 clone 不是一个 Go module：什么都编译不了，`Dockerfile` 的 `COPY go.mod go.sum` 失败，release 工作流全线挂掉。规则收窄为 `go-build*`，两个文件重新纳入版本控制
+- **桌面版在 macOS / Linux 上编译失败**：`main.go` 无条件导入 `golang.org/x/sys/windows`。平台相关的错误对话框拆分为 `fatal_windows.go` / `fatal_other.go`，非 Windows 平台写 stderr
+- 无头版 Windows 二进制不再带 `-H windowsgui`：该链接选项会剥离控制台，日志看不见、Ctrl+C 收不到，而这正是无头模式的关停路径
+- Anthropic / Gemini 转发改用 `NewRequestWithContext` 传递客户端上下文：此前客户端断开后，上游流会继续生成（`streamClient` 无总超时）并继续计费
+- Gemini 不再套用 Anthropic 的 `max_tokens` 默认值（4096）：Gemini 本身不要求该字段且默认用模型上限，之前会让未设上限的请求被静默截断
+- 工具链版本统一：`go.mod` 声明 `go 1.26`，CI 改用 `go-version-file: go.mod` 读取，消除此前 go.mod 要求 1.26 而 CI 装 1.24 的分叉
+- `cooldowns.json` 移出版本控制并加入 `.gitignore`（该文件会写入上游 API Key）
+
+### Changed
+- 转换渠道遇到无法表达的特性（`tools` / `tool_choice`、多模态 `image_url` 等 content part、`response_format`、`n>1`）时不再静默丢弃后返回 200。这类请求被限制路由到 `openai` 类型渠道（原样透传）；若该模型没有 `openai` 渠道，返回 400 并点名具体特性与解决办法
+- 桌面版关闭窗口时先排空在途请求（10 秒 `Shutdown`）再停后台任务，与无头版的关停语义对齐；此前正在流式输出的请求会被硬切
 
 ## [1.0.1] - 2025-09-01
 

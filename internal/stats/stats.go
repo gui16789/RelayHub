@@ -12,7 +12,7 @@ import (
 // Collector keeps in-memory counters for the admin console. It is purely
 // observational: losing it on restart is acceptable.
 type Collector struct {
-	mu       sync.RWMutex
+	mu        sync.RWMutex
 	startedAt time.Time
 
 	totalRequests         uint64
@@ -28,8 +28,8 @@ type Collector struct {
 	// used for p50/p95 percentile reporting. Ring buffer, not persisted.
 	latencies map[string][]int64
 
-	events  []Event         // ring buffer of recent failover/admin events
-	traces  []RequestTrace  // ring buffer of recent request routing traces
+	events []Event        // ring buffer of recent failover/admin events
+	traces []RequestTrace // ring buffer of recent request routing traces
 }
 
 type channelCounters struct {
@@ -140,6 +140,21 @@ func (c *Collector) RecordUnrouted(model string) {
 	})
 }
 
+// RecordUnconvertible counts a request rejected because it used features the
+// protocol converters cannot express (e.g. tools against an anthropic-only
+// model), so the client got a 400 without any upstream attempt.
+func (c *Collector) RecordUnconvertible(model, features string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.totalFailed++
+	c.pushEventLocked(Event{
+		Time:    nowStamp(),
+		Level:   "warn",
+		Message: "model " + model + " cannot serve " + features + " (no passthrough channel)",
+	})
+}
+
 // RecordTotalFailure means every attempt failed and the client got an error.
 func (c *Collector) RecordTotalFailure(model string) {
 	c.mu.Lock()
@@ -164,8 +179,8 @@ func (c *Collector) PushEvent(level, channel, message string) {
 type TraceHop struct {
 	Channel    string `json:"channel"`
 	KeyTail    string `json:"key_tail"`
-	Status     int    `json:"status"`     // upstream status; 0 = network error before a response
-	Result     string `json:"result"`     // served | failed | aborted | error
+	Status     int    `json:"status"` // upstream status; 0 = network error before a response
+	Result     string `json:"result"` // served | failed | aborted | error
 	Detail     string `json:"detail,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
 }
@@ -174,15 +189,15 @@ type TraceHop struct {
 // The console shows the recent ring so "why did this go to channel X" is
 // answerable from the UI instead of the Go log.
 type RequestTrace struct {
-	Time         string     `json:"time"`
-	Model        string     `json:"model"`
-	Stream       bool       `json:"stream"`
-	FinalStatus  int        `json:"final_status"`  // what the client received
-	FinalChannel string     `json:"final_channel"` // "" when no channel served
-	TotalMS      int64      `json:"total_ms"`
-	PromptTokens int        `json:"prompt_tokens"`
-	CompletionTokens int    `json:"completion_tokens"`
-	Hops         []TraceHop `json:"hops"`
+	Time             string     `json:"time"`
+	Model            string     `json:"model"`
+	Stream           bool       `json:"stream"`
+	FinalStatus      int        `json:"final_status"`  // what the client received
+	FinalChannel     string     `json:"final_channel"` // "" when no channel served
+	TotalMS          int64      `json:"total_ms"`
+	PromptTokens     int        `json:"prompt_tokens"`
+	CompletionTokens int        `json:"completion_tokens"`
+	Hops             []TraceHop `json:"hops"`
 }
 
 const maxTraces = 100
@@ -294,16 +309,16 @@ func percentile(sample []int64, p float64) int64 {
 
 // Summary is everything the console needs to render the dashboard header.
 type Summary struct {
-	Enabled             bool          `json:"enabled"`
-	UptimeSeconds       int64         `json:"uptime_seconds"`
-	TotalRequests       uint64        `json:"total_requests"`
-	TotalServed         uint64        `json:"total_served"`
-	TotalFailed         uint64        `json:"total_failed"`
-	TotalFallovers      uint64        `json:"total_fallovers"`
-	TotalPromptTokens   uint64        `json:"total_prompt_tokens"`
-	TotalCompletionTokens uint64      `json:"total_completion_tokens"`
-	Channels            []ChannelStat `json:"channels"`
-	Models              []ModelStat   `json:"models"`
+	Enabled               bool          `json:"enabled"`
+	UptimeSeconds         int64         `json:"uptime_seconds"`
+	TotalRequests         uint64        `json:"total_requests"`
+	TotalServed           uint64        `json:"total_served"`
+	TotalFailed           uint64        `json:"total_failed"`
+	TotalFallovers        uint64        `json:"total_fallovers"`
+	TotalPromptTokens     uint64        `json:"total_prompt_tokens"`
+	TotalCompletionTokens uint64        `json:"total_completion_tokens"`
+	Channels              []ChannelStat `json:"channels"`
+	Models                []ModelStat   `json:"models"`
 }
 
 // Summary builds the dashboard payload. enabled comes from the config store,
