@@ -77,11 +77,11 @@ type Logging struct {
 }
 
 type Channel struct {
-	Name     string   `yaml:"name" json:"name"`
-	Type     string   `yaml:"type" json:"type"` // openai | anthropic | gemini
-	BaseURL  string   `yaml:"base_url" json:"base_url"`
-	APIKeys  []string `yaml:"api_keys" json:"api_keys"`
-	Models   []string `yaml:"models" json:"models"` // exact names or trailing-wildcard patterns like "claude-*"
+	Name    string   `yaml:"name" json:"name"`
+	Type    string   `yaml:"type" json:"type"` // openai | anthropic | gemini
+	BaseURL string   `yaml:"base_url" json:"base_url"`
+	APIKeys []string `yaml:"api_keys" json:"api_keys"`
+	Models  []string `yaml:"models" json:"models"` // exact names or trailing-wildcard patterns like "claude-*"
 	// ModelMap translates client-facing model names into the upstream's own
 	// names when forwarding (e.g. {"deepseek-chat": "deepseek-chat-v3"}).
 	// Empty or absent means the model name passes through unchanged.

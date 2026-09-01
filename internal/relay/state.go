@@ -53,8 +53,8 @@ type cooldownEntry struct {
 // streakEntry counts consecutive 5xx responses for one key; the streak
 // expires if the channel was quiet for longer than streakWindow.
 type streakEntry struct {
-	count     int
-	lastSeen  time.Time
+	count    int
+	lastSeen time.Time
 }
 
 type healthEntry struct {

@@ -67,14 +67,14 @@ type channelView struct {
 
 type statusResponse struct {
 	stats.Summary
-	ConfigPath string               `json:"config_path"`
-	Listen     string               `json:"listen"`
-	APIKey     string               `json:"api_key"`
+	ConfigPath string `json:"config_path"`
+	Listen     string `json:"listen"`
+	APIKey     string `json:"api_key"`
 	// KeyStrategy is the global key rotation strategy applied to all channels
 	// with multiple keys ("round_robin" or "preferred_first").
 	KeyStrategy string               `json:"key_strategy"`
-	Channels   []channelView        `json:"channels"`
-	Cooldowns  []relay.CooldownInfo `json:"cooldowns"`
+	Channels    []channelView        `json:"channels"`
+	Cooldowns   []relay.CooldownInfo `json:"cooldowns"`
 }
 
 func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request) {
@@ -88,15 +88,15 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 	channels := make([]channelView, 0, len(snapshot.Channels))
 	for _, channel := range snapshot.Channels {
 		view := channelView{
-			Name:        channel.Name,
-			Type:        channel.Type,
-			BaseURL:     channel.BaseURL,
-			APIKeys:     maskKeys(channel.APIKeys),
-			Models:      channel.Models,
-			ModelMap:    channel.ModelMap,
-			Headers:     channel.Headers,
-			Priority:    channel.Priority,
-			Enabled:     channel.IsEnabled(),
+			Name:     channel.Name,
+			Type:     channel.Type,
+			BaseURL:  channel.BaseURL,
+			APIKeys:  maskKeys(channel.APIKeys),
+			Models:   channel.Models,
+			ModelMap: channel.ModelMap,
+			Headers:  channel.Headers,
+			Priority: channel.Priority,
+			Enabled:  channel.IsEnabled(),
 		}
 		if view.ModelMap == nil {
 			view.ModelMap = map[string]string{}
@@ -245,15 +245,15 @@ func (s *Server) handleChannels(writer http.ResponseWriter, request *http.Reques
 		views := make([]channelView, 0, len(snapshot.Channels))
 		for _, channel := range snapshot.Channels {
 			view := channelView{
-				Name:        channel.Name,
-				Type:        channel.Type,
-				BaseURL:     channel.BaseURL,
-				APIKeys:     maskKeys(channel.APIKeys),
-				Models:      channel.Models,
-				ModelMap:    channel.ModelMap,
-				Headers:     channel.Headers,
-				Priority:    channel.Priority,
-				Enabled:     channel.IsEnabled(),
+				Name:     channel.Name,
+				Type:     channel.Type,
+				BaseURL:  channel.BaseURL,
+				APIKeys:  maskKeys(channel.APIKeys),
+				Models:   channel.Models,
+				ModelMap: channel.ModelMap,
+				Headers:  channel.Headers,
+				Priority: channel.Priority,
+				Enabled:  channel.IsEnabled(),
 			}
 			if view.ModelMap == nil {
 				view.ModelMap = map[string]string{}

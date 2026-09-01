@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: vet + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # A committed go.mod/go.sum is what makes a fresh clone buildable at
+      # all; -mod=readonly turns "someone forgot to commit a dep" into a
+      # failure here instead of a broken release tag.
+      - name: Verify module files are complete
+        run: |
+          go mod download -x
+          go mod verify
+          go build -mod=readonly ./...
+
+      - name: go vet
+        run: go vet ./...
+
+      # Only tracked files: a local module cache (.gopath/) is gitignored but
+      # would otherwise drown the output in third-party formatting noise.
+      - name: gofmt
+        run: |
+          unformatted="$(git ls-files '*.go' | xargs gofmt -l)"
+          if [ -n "$unformatted" ]; then
+            echo "These files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      # The relay layer is concurrent by nature (health-probe goroutines,
+      # shared cooldown state, hot-reloading config), so the race detector
+      # is the point of this job rather than a nicety.
+      - name: go test -race
+        run: go test -race -count=1 ./...
+
+  # The desktop entry point is Wails + platform-specific code. Compiling it on
+  # every OS is what catches a Windows-only import sneaking into main.go.
+  build-desktop:
+    name: desktop build (${{ matrix.goos }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            goos: windows
+          - runner: macos-latest
+            goos: darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compile desktop entry point
+        env:
+          CGO_ENABLED: 1
+        shell: bash
+        run: go build -tags desktop,production -o /dev/null .
+
+  # Headless is the server artifact, so prove every published target still
+  # cross-compiles before a tag does it for real.
+  build-headless:
+    name: headless cross-compile
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: go build -tags=production -o /dev/null ./cmd/headless
+
+  docker:
+    name: docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Building the image from a clean checkout is the only check that the
+      # Dockerfile's `COPY go.mod go.sum` finds committed files.
+      - name: Build image
+        run: docker build -t relayhub:ci .
