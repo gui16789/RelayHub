@@ -587,6 +587,19 @@ const consoleHTML = `<!DOCTYPE html>
           </div>
         </div>
         <div class="panel settings-card">
+          <h2>Key 轮询策略（server.key_strategy）</h2>
+          <div class="sub">多 key 渠道的默认 key 切换策略（全局生效）</div>
+          <div class="field">
+            <label for="keyStrategy">切换策略</label>
+            <select id="keyStrategy" style="max-width:260px">
+              <option value="round_robin">round_robin — 轮询切换（默认）</option>
+              <option value="preferred_first">preferred_first — 优先首个 key，故障再切换</option>
+            </select>
+          </div>
+          <div class="hint">preferred_first 持续使用第一个 key，仅在其出错/冷却时切到下一个 key，冷却结束自动回到首选 key，适合提升上游 prompt 缓存命中率。</div>
+          <button class="btn primary" onclick="saveKeyStrategy()">保存策略</button>
+        </div>
+        <div class="panel settings-card">
           <h2>安全提示</h2>
           <div class="sub">管理台的访问控制方式</div>
           <div class="hint" style="margin-top:0">
@@ -878,6 +891,11 @@ function renderStatus(data) {
   if (document.activeElement !== keyInput && keyInput.value !== (data.api_key || "")) {
     keyInput.value = data.api_key || "";
   }
+  // Global key rotation strategy (do not clobber while the user is editing).
+  var strategySelect = document.getElementById("keyStrategy");
+  if (document.activeElement !== strategySelect) {
+    strategySelect.value = data.key_strategy || "round_robin";
+  }
   var badge = document.getElementById("authBadge");
   if (data.api_key) {
     badge.textContent = "鉴权已启用";
@@ -994,6 +1012,21 @@ function saveServerKey() {
     if (!result.ok) { toast("保存失败: " + (result.data.error || "未知错误")); return; }
     toast(key ? "接入密钥已启用，第三方需携带该 key" : "已清除接入密钥（不校验）");
     refresh();
+  }).catch(function (err) { toast("保存失败: " + err); });
+}
+
+// Save the global key rotation strategy (server.key_strategy).
+function saveKeyStrategy() {
+  var strategy = document.getElementById("keyStrategy").value;
+  fetch("/admin/api/key-strategy", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key_strategy: strategy })
+  }).then(function (response) {
+    return response.json().then(function (data) { return { ok: response.ok, data: data }; });
+  }).then(function (result) {
+    if (!result.ok) { toast("保存失败: " + (result.data.error || "未知错误")); return; }
+    toast(strategy === "preferred_first" ? "已保存：固定首选 key 策略" : "已保存：轮询切换策略");
   }).catch(function (err) { toast("保存失败: " + err); });
 }
 

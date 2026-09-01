@@ -119,19 +119,32 @@ func keyIdentity(channelName, apiKey string) string {
 	return channelName + "\x00" + apiKey
 }
 
-// OrderedKeys returns the channel's keys starting from the round-robin cursor,
-// skipping any key currently in cooldown.
-func (s *State) OrderedKeys(channel config.Channel) []string {
+// OrderedKeys returns the channel's usable keys in the order the router should
+// try them, skipping any key currently in cooldown. The starting key depends on
+// the GLOBAL (server-level) key_strategy:
+//   - round_robin (default): the starting key advances on every request so
+//     load is spread evenly across the channel's keys;
+//   - preferred_first: always start from the first configured key. Failover to
+//     the next key happens in the handler's attempt loop when the preferred key
+//     errors or is cooling down; once the preferred key recovers from cooldown
+//     it is automatically preferred again.
+func (s *State) OrderedKeys(channel config.Channel, keyStrategy string) []string {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	counter, ok := s.nextIndex[channel.Name]
-	if !ok {
-		counter = &atomic.Uint64{}
-		s.nextIndex[channel.Name] = counter
+	var start int
+	if keyStrategy == config.KeyStrategyPreferredFirst {
+		// Sticky first key: do not advance the round-robin cursor.
+		start = 0
+	} else {
+		counter, ok := s.nextIndex[channel.Name]
+		if !ok {
+			counter = &atomic.Uint64{}
+			s.nextIndex[channel.Name] = counter
+		}
+		start = int(counter.Add(1)-1) % len(channel.APIKeys)
 	}
-	start := int(counter.Add(1)-1) % len(channel.APIKeys)
 
 	ordered := make([]string, 0, len(channel.APIKeys))
 	for offset := 0; offset < len(channel.APIKeys); offset++ {

@@ -16,6 +16,18 @@ const (
 	TypeGemini    = "gemini"
 )
 
+// Key strategies for channels with multiple API keys (global, server-level).
+const (
+	// KeyStrategyRoundRobin: every request advances the starting key, so
+	// load is spread evenly across all keys (the default behavior).
+	KeyStrategyRoundRobin = "round_robin"
+	// KeyStrategyPreferredFirst: always try the first configured key first
+	// and only fail over to the next key when the preferred one errors or is
+	// cooling down. Keeps the upstream account stable so its prompt/context
+	// cache stays warm.
+	KeyStrategyPreferredFirst = "preferred_first"
+)
+
 type Server struct {
 	Listen string `yaml:"listen" json:"listen"`
 	// Optional: clients must present this as Bearer token. Empty means no auth.
@@ -26,12 +38,29 @@ type Server struct {
 	// MaxAttempts caps how many channel/key combinations a single request
 	// tries before giving up. 0 (or absent) means unlimited.
 	MaxAttempts int `yaml:"max_attempts,omitempty" json:"max_attempts,omitempty"`
+	// KeyStrategy is the GLOBAL key rotation strategy applied to every
+	// channel with multiple keys. Empty or "round_robin" = rotate the
+	// starting key every request (default); "preferred_first" = always try
+	// the first key first, fail over only on error / cooldown (better
+	// upstream cache affinity).
+	KeyStrategy string `yaml:"key_strategy,omitempty" json:"key_strategy,omitempty"`
 	// nil means enabled; the admin console can flip it at runtime and persist here.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // IsEnabled treats a missing flag as "on" so old config files keep working.
 func (s *Server) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
+
+// normalizeServer validates the server-level settings.
+func (s *Server) normalizeServer() error {
+	s.KeyStrategy = strings.ToLower(strings.TrimSpace(s.KeyStrategy))
+	switch s.KeyStrategy {
+	case "", KeyStrategyRoundRobin, KeyStrategyPreferredFirst:
+	default:
+		return fmt.Errorf("unsupported key_strategy %q (allowed: round_robin, preferred_first)", s.KeyStrategy)
+	}
+	return nil
+}
 
 // Logging configures where the process-wide slog output goes. All fields
 // are optional; absent fields fall back to sensible defaults so an old
@@ -151,6 +180,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Server.Listen == "" {
 		cfg.Server.Listen = ":8787"
+	}
+	if err := cfg.Server.normalizeServer(); err != nil {
+		return nil, err
 	}
 	expandEnv(cfg)
 	for i := range cfg.Channels {

@@ -115,6 +115,19 @@ func (s *Store) SetServerAPIKey(key string) error {
 	return s.saveLocked()
 }
 
+// SetKeyStrategy sets the global key rotation strategy (round_robin or
+// preferred_first) for all multi-key channels, and persists it.
+func (s *Store) SetKeyStrategy(strategy string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	strategy = strings.ToLower(strings.TrimSpace(strategy))
+	if strategy != "" && strategy != config.KeyStrategyRoundRobin && strategy != config.KeyStrategyPreferredFirst {
+		return fmt.Errorf("unsupported key_strategy %q (allowed: round_robin, preferred_first)", strategy)
+	}
+	s.cfg.Server.KeyStrategy = strategy
+	return s.saveLocked()
+}
+
 // ListChannels returns a copy of all channels in config order.
 func (s *Store) ListChannels() []config.Channel {
 	s.mu.RLock()

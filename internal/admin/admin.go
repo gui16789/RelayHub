@@ -29,6 +29,7 @@ func (s *Server) Mux() *http.ServeMux {
 	mux.HandleFunc("/admin/", s.serveConsole)
 	mux.HandleFunc("/admin/api/status", s.handleStatus)
 	mux.HandleFunc("/admin/api/server", s.handleServer)
+	mux.HandleFunc("/admin/api/key-strategy", s.handleKeyStrategy)
 	mux.HandleFunc("/admin/api/proxy/enable", s.handleProxyEnable)
 	mux.HandleFunc("/admin/api/channels", s.handleChannels)
 	mux.HandleFunc("/admin/api/channels/", s.handleChannelByName)
@@ -67,6 +68,9 @@ type statusResponse struct {
 	ConfigPath string               `json:"config_path"`
 	Listen     string               `json:"listen"`
 	APIKey     string               `json:"api_key"`
+	// KeyStrategy is the global key rotation strategy applied to all channels
+	// with multiple keys ("round_robin" or "preferred_first").
+	KeyStrategy string               `json:"key_strategy"`
 	Channels   []channelView        `json:"channels"`
 	Cooldowns  []relay.CooldownInfo `json:"cooldowns"`
 }
@@ -82,15 +86,15 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 	channels := make([]channelView, 0, len(snapshot.Channels))
 	for _, channel := range snapshot.Channels {
 		view := channelView{
-			Name:     channel.Name,
-			Type:     channel.Type,
-			BaseURL:  channel.BaseURL,
-			APIKeys:  maskKeys(channel.APIKeys),
-			Models:   channel.Models,
-			ModelMap: channel.ModelMap,
-			Headers:  channel.Headers,
-			Priority: channel.Priority,
-			Enabled:  channel.IsEnabled(),
+			Name:        channel.Name,
+			Type:        channel.Type,
+			BaseURL:     channel.BaseURL,
+			APIKeys:     maskKeys(channel.APIKeys),
+			Models:      channel.Models,
+			ModelMap:    channel.ModelMap,
+			Headers:     channel.Headers,
+			Priority:    channel.Priority,
+			Enabled:     channel.IsEnabled(),
 		}
 		if view.ModelMap == nil {
 			view.ModelMap = map[string]string{}
@@ -114,12 +118,13 @@ func (s *Server) handleStatus(writer http.ResponseWriter, request *http.Request)
 	}
 
 	writeJSON(writer, statusResponse{
-		Summary:    summary,
-		ConfigPath: s.store.Path(),
-		Listen:     snapshot.Server.Listen,
-		APIKey:     snapshot.Server.APIKey,
-		Channels:   channels,
-		Cooldowns:  s.handler.State().Cooldowns(),
+		Summary:     summary,
+		ConfigPath:  s.store.Path(),
+		Listen:      snapshot.Server.Listen,
+		APIKey:      snapshot.Server.APIKey,
+		KeyStrategy: snapshot.Server.KeyStrategy,
+		Channels:    channels,
+		Cooldowns:   s.handler.State().Cooldowns(),
 	})
 }
 
@@ -149,6 +154,40 @@ func (s *Server) handleServer(writer http.ResponseWriter, request *http.Request)
 			state = "开启"
 		}
 		s.collector.PushEvent("info", "", "接入密钥鉴权"+state)
+		writeJSON(writer, map[string]any{"ok": true})
+	default:
+		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleKeyStrategy manages the global key rotation strategy applied to every
+// channel with multiple keys. GET returns the current value; PUT updates it.
+// Accepted values: "round_robin" (default) or "preferred_first".
+func (s *Server) handleKeyStrategy(writer http.ResponseWriter, request *http.Request) {
+	switch request.Method {
+	case http.MethodGet:
+		snapshot := s.store.Snapshot()
+		writeJSON(writer, map[string]any{
+			"ok":           true,
+			"key_strategy": snapshot.Server.KeyStrategy,
+		})
+	case http.MethodPut:
+		var payload struct {
+			KeyStrategy *string `json:"key_strategy"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil || payload.KeyStrategy == nil {
+			writeError(writer, http.StatusBadRequest, "invalid body: key_strategy is required")
+			return
+		}
+		if err := s.store.SetKeyStrategy(*payload.KeyStrategy); err != nil {
+			writeError(writer, http.StatusBadRequest, err.Error())
+			return
+		}
+		state := "轮询切换"
+		if *payload.KeyStrategy == config.KeyStrategyPreferredFirst {
+			state = "固定首选key"
+		}
+		s.collector.PushEvent("info", "", "Key切换策略调整为"+state)
 		writeJSON(writer, map[string]any{"ok": true})
 	default:
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
@@ -204,15 +243,15 @@ func (s *Server) handleChannels(writer http.ResponseWriter, request *http.Reques
 		views := make([]channelView, 0, len(snapshot.Channels))
 		for _, channel := range snapshot.Channels {
 			view := channelView{
-				Name:     channel.Name,
-				Type:     channel.Type,
-				BaseURL:  channel.BaseURL,
-				APIKeys:  maskKeys(channel.APIKeys),
-				Models:   channel.Models,
-				ModelMap: channel.ModelMap,
-				Headers:  channel.Headers,
-				Priority: channel.Priority,
-				Enabled:  channel.IsEnabled(),
+				Name:        channel.Name,
+				Type:        channel.Type,
+				BaseURL:     channel.BaseURL,
+				APIKeys:     maskKeys(channel.APIKeys),
+				Models:      channel.Models,
+				ModelMap:    channel.ModelMap,
+				Headers:     channel.Headers,
+				Priority:    channel.Priority,
+				Enabled:     channel.IsEnabled(),
 			}
 			if view.ModelMap == nil {
 				view.ModelMap = map[string]string{}

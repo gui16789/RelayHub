@@ -202,7 +202,7 @@ func TestQuotaCooldownPersistence(t *testing.T) {
 
 	restored := NewState()
 	restored.SetPersistence(path)
-	keys := restored.OrderedKeys(config.Channel{Name: "ch", APIKeys: []string{"sk-persisted", "sk-short"}})
+	keys := restored.OrderedKeys(config.Channel{Name: "ch", APIKeys: []string{"sk-persisted", "sk-short"}}, config.KeyStrategyRoundRobin)
 	if len(keys) != 1 || keys[0] != "sk-short" {
 		t.Fatalf("restored keys = %v, want only sk-short usable", keys)
 	}

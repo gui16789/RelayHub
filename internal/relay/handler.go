@@ -265,7 +265,7 @@ func (h *Handler) buildAttempts(snapshot *config.Config, model string, openAIOnl
 			continue
 		}
 		upstreamModel := channel.UpstreamModel(model)
-		for _, apiKey := range h.state.OrderedKeys(channel) {
+		for _, apiKey := range h.state.OrderedKeys(channel, snapshot.Server.KeyStrategy) {
 			attempts = append(attempts, attempt{
 				channel:       channel,
 				apiKey:        apiKey,
