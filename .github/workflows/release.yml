@@ -1,0 +1,158 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  LDFLAGS_PREFIX: -s -w -X github.com/local/proxy/internal/version.Version=${{ github.ref_name }} -X github.com/local/proxy/internal/version.Commit=${{ github.sha }}
+  VERSION: ${{ github.ref_name }}
+
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ── Desktop (Wails) builds ───────────────────────────────────
+          - runner: windows-latest
+            goos: windows
+            goarch: amd64
+            desktop: true
+          - runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            desktop: true
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            desktop: true
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            desktop: true   # will fall back to headless (no GUI on runner)
+
+          # ── Headless builds (cross-compile) ──────────────────────────
+          - runner: ubuntu-latest
+            goos: windows
+            goarch: amd64
+            desktop: false
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            desktop: false
+          - runner: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            desktop: false
+          - runner: macos-latest
+            goos: darwin
+            goarch: amd64
+            desktop: false
+          - runner: macos-latest
+            goos: darwin
+            goarch: arm64
+            desktop: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Resolve build metadata
+        id: meta
+        shell: bash
+        run: |
+          VER="${VERSION#v}"
+          VER="${VER:-$(git rev-parse --short HEAD)}"
+          COMMIT="$(git rev-parse --short HEAD)"
+          BUILDTIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "builddate=$BUILDTIME" >> "$GITHUB_OUTPUT"
+          echo "ldflags=-s -w -X github.com/local/relayhub/internal/version.Version=$VER -X github.com/local/relayhub/internal/version.Commit=$COMMIT -X github.com/local/relayhub/internal/version.BuildTime=$BUILDTIME" >> "$GITHUB_OUTPUT"
+
+      # ── Desktop (Wails) build ────────────────────────────────────────
+      - name: Build desktop (Wails)
+        if: matrix.desktop && matrix.runner != 'ubuntu-latest'
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 1
+        shell: bash
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          wails build -platform "$GOOS/$GOARCH" \
+            -ldflags "${{ steps.meta.outputs.ldflags }}" \
+            -o "ProxyDesktop-${GOOS}-${GOARCH}"
+          echo "buildtype=desktop" >> "$GITHUB_OUTPUT"
+
+      # ── Linux desktop runner has no GUI: skip, headless covers it ───
+      - name: Skip desktop on Linux
+        if: matrix.desktop && matrix.runner == 'ubuntu-latest'
+        run: |
+          echo "No GUI on ubuntu runner; Linux desktop is skipped. Headless binary covers linux/amd64."
+          exit 0
+
+      # ── Headless build (cross-compile, no GUI deps) ──────────────────
+      - name: Build headless
+        if: !matrix.desktop
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        shell: bash
+        run: |
+          EXT=""
+          [ "$GOOS" = "windows" ] && EXT=".exe"
+          LDFLAGS="-H windowsgui ${{ steps.meta.outputs.ldflags }}"
+          go build -tags=production \
+            -ldflags "$LDFLAGS" \
+            -o "proxy-headless-${GOOS}-${GOARCH}${EXT}" \
+            ./cmd/headless
+          echo "buildtype=headless" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.meta.outputs.buildtype || 'skip' }}
+          path: |
+            ProxyDesktop-*
+            proxy-headless-*
+          if-no-files-found: warn
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: *** github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/**/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

@@ -1,0 +1,37 @@
+# Local secrets: never commit real API keys
+config.yaml
+config.yaml.bak
+*.bak
+
+# Stats persistence snapshot
+stats.json
+stats.json.tmp
+
+# Build artifacts
+*.exe
+build/bin/
+*.out
+
+# Debug leftovers
+probe-*.txt
+
+# Go caches
+go-build*
+go.*
+
+# Wails build cache
+.wails/
+
+# Local Go module/cache dirs
+.gopath/
+.gocache/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+*.user
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

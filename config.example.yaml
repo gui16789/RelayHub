@@ -1,0 +1,66 @@
+server:
+  listen: ":8787"
+  # 客户端访问本代理需要的 key（留空则不鉴权）。支持 ${ENV_VAR} 引用环境变量。
+  api_key: "sk-my-proxy-secret"
+  # 管理控制台鉴权：回环地址（127.0.0.1）始终可访问；
+  # 设置 admin_key 后，远程客户端需以 Bearer 方式提供该 key 才能打开 /admin/。
+  # 留空 = 管理台仅本机可访问（推荐）。
+  admin_key: ""
+  # 单个请求最多尝试的 渠道×密钥 组合数，0 = 不限制。
+  max_attempts: 0
+  # 代理总开关（可通过管理控制台 /admin/ 切换，改动会自动写回本文件）
+  enabled: true
+
+# 可选：日志配置。整段可省略，缺省时按下方默认值生效。
+logging:
+  # 级别：debug | info | warn | error，默认 info
+  level: info
+  # 日志目录，默认 %APPDATA%/RelayHub/logs（桌面应用不要写 exe 旁或
+  # 工作目录，二者可能只读）
+  # dir: "D:/logs/proxy"
+  # 日志文件名，默认按入口区分：proxy.log（桌面版）/ proxy-headless.log（无头版）。
+  # 单文件满 10 MiB 自动滚动，保留 3 个、14 天，旧文件压缩归档。
+  # file: "proxy.log"
+
+
+channels:
+  # OpenAI 兼容站点：请求原样透传（chat/completions、responses、images、
+  # embeddings、audio 等 /v1/* 端点都会按模型路由到这类渠道）
+  - name: some-relay-site
+    type: openai
+    base_url: https://api.example-relay.com
+    api_keys:
+      - sk-key-1
+      - ${MY_UPSTREAM_KEY}     # 支持环境变量，避免密钥明文落盘
+    models:
+      - gpt-4o
+      - gpt-4o-mini
+      - deepseek-*          # 支持通配符匹配
+    priority: 10            # 数字越大越优先，失败自动降级到下一个渠道
+    # 可选：把客户端模型名映射为上游实际模型名
+    model_map:
+      gpt-4o: gpt-4o-2024-08-06
+    # 可选：附加请求头（Authorization / Content-Type 为保留头，不可覆盖）
+    headers:
+      X-Title: my-proxy
+
+  # Claude 原生协议站点：自动做 OpenAI <-> Anthropic 格式转换（含流式）
+  - name: claude-official
+    type: anthropic
+    base_url: https://api.anthropic.com
+    api_keys:
+      - sk-ant-xxx
+    models:
+      - claude-*
+    priority: 8
+
+  # Gemini 原生协议站点：自动做 OpenAI <-> Gemini 格式转换（含流式）
+  - name: gemini-official
+    type: gemini
+    base_url: https://generativelanguage.googleapis.com
+    api_keys:
+      - AIzaSy-xxx-1
+      - AIzaSy-xxx-2
+    models:
+      - gemini-*
+    priority: 5

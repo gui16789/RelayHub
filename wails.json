@@ -1,0 +1,17 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "RelayHub",
+  "outputfilename": "RelayHub",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:serverUrl": "",
+  "author": {
+    "name": "local"
+  },
+  "info": {
+    "productName": "RelayHub",
+    "productVersion": "1.0.1",
+    "comments": "Multi-site API key relay proxy with built-in admin console"
+  }
+}

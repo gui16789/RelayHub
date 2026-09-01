@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "1.0.1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "1.0.1",
+			"CompanyName": "local",
+			"FileDescription": "RelayHub 管理控制台",
+			"LegalCopyright": "© now, local.",
+			"ProductName": "RelayHub",
+			"Comments": "Multi-site API key relay proxy with built-in admin console"
+		}
+	}
+}

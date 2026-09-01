@@ -1,0 +1,14 @@
+server:
+    listen: :8787
+    api_key: ""
+    enabled: true
+channels:
+    - name: mock-site
+      type: openai
+      base_url: http://127.0.0.1:9999
+      api_keys:
+        - sk-bad-key
+        - sk-good-key
+      models:
+        - gpt-4o-mini
+      priority: 10

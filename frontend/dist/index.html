@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>启动中</title>
+<style>
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: #0f1117; color: #e6e8ee;
+    font: 15px "Segoe UI", "Microsoft YaHei", sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 18px; user-select: none;
+  }
+  .logo { font-size: 42px; }
+  .spinner {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid #2a2f3e; border-top-color: #60a5fa;
+    animation: spin 0.9s linear infinite;
+  }
+  .hint { color: #8b91a3; font-size: 13px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="logo">&#9889;</div>
+  <div class="spinner"></div>
+  <div>Proxy 服务启动中…</div>
+  <div class="hint">窗口将自动跳转到管理控制台</div>
+</body>
+</html>
