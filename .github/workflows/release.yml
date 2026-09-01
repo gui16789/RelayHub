@@ -130,8 +130,10 @@ jobs:
         run: |
           EXT=""
           [ "$GOOS" = "windows" ] && EXT=".exe"
+          # No -H windowsgui here: the headless binary is a console program.
+          # Detaching it from the console would hide its log output and stop
+          # it from receiving Ctrl+C, which is its whole shutdown path.
           LDFLAGS="${{ steps.meta.outputs.ldflags }}"
-          [ "$GOOS" = "windows" ] && LDFLAGS="-H windowsgui $LDFLAGS"
           go build -tags=production \
             -ldflags "$LDFLAGS" \
             -o "relayhub-headless-${GOOS}-${GOARCH}${EXT}" \

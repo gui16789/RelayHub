@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"embed"
+	"errors"
 	"fmt"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -17,7 +17,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
-	"golang.org/x/sys/windows"
 
 	"github.com/local/relayhub/internal/logging"
 	"github.com/local/relayhub/internal/server"
@@ -77,8 +76,9 @@ func main() {
 	// Boot the HTTP server before the window so the proxy keeps serving
 	// no matter what happens to the GUI lifecycle.
 	service := server.New(cfgStore)
+	httpServer := &http.Server{Handler: service}
 	go func() {
-		if err := (&http.Server{Handler: service}).Serve(listener); err != nil {
+		if err := httpServer.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server failed", "listen", listen, "err", err)
 		}
 	}()
@@ -98,7 +98,14 @@ func main() {
 	}); err != nil {
 		fatalDialog("桌面窗口启动失败", err.Error())
 	}
-	// Window closed: stop background jobs and persist the final stats.
+	// Window closed: drain in-flight requests before stopping background jobs,
+	// so closing the window does not cut off a stream mid-generation. Mirrors
+	// the headless binary's shutdown path.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		slog.Warn("graceful shutdown incomplete", "err", err)
+	}
 	service.Close()
 }
 
@@ -171,15 +178,4 @@ func ensureConfigFile(path string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte(defaultConfigYAML), 0o600)
-}
-
-func fatalDialog(title, message string) {
-	log.Printf("%s: %s", title, message)
-	_, _ = windows.MessageBox(
-		0,
-		windows.StringToUTF16Ptr(message),
-		windows.StringToUTF16Ptr(title),
-		windows.MB_OK|windows.MB_ICONERROR,
-	)
-	os.Exit(1)
 }
