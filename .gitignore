@@ -3,9 +3,12 @@ config.yaml
 config.yaml.bak
 *.bak
 
-# Stats persistence snapshot
+# Runtime state snapshots. cooldowns.json holds upstream API keys, so it must
+# never be committed.
 stats.json
 stats.json.tmp
+cooldowns.json
+cooldowns.json.tmp
 
 # Build artifacts
 *.exe
@@ -15,9 +18,10 @@ build/bin/
 # Debug leftovers
 probe-*.txt
 
-# Go caches
+# Go build cache only. Do NOT widen this to `go.*`: that pattern also matches
+# go.mod and go.sum, and excluding those leaves a fresh clone with no module
+# at all (nothing builds, and the Dockerfile's `COPY go.mod go.sum` fails).
 go-build*
-go.*
 
 # Wails build cache
 .wails/
