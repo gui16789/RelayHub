@@ -8,7 +8,6 @@
 - 配额冷却持久化不再写入明文密钥：`cooldowns.json` 现在只存密钥的单向指纹（截断 SHA-256）与尾 4 位，与项目其他位置「只记尾号」的做法一致。密钥在包内的身份标识本身改为指纹，因此重启恢复无需明文。旧版本写下的明文条目在首次加载时自动迁移为指纹并立即重写文件（不迁移会让所有已耗尽的密钥在升级时同时苏醒）
 
 ### Added
-- 渠道重名校验：`config.Load` 拒绝重名渠道，并拒绝仅大小写不同的名字。渠道名是冷却状态、5xx 连击计数、探针健康与 per-channel 统计的 map key，重名会让两个渠道静默共享全部状态。管理台的新增/重命名路径同步改为大小写不敏感判断 —— 此前可以从 UI 存进一份下次启动会被加载器拒绝的配置，导致服务无法用自己保存的状态启动
 - 服务器部署支持：多阶段 `Dockerfile`（非 root、健康检查、`/data` 卷持久化）、`docker-compose.yml` 与部署文档 `docs/deploy-server.md`（含 Caddy / Nginx HTTPS 反代示例与安全清单）
 - 首次启动网页引导：配置文件缺失时以默认配置启动，`/admin/setup` 提供初始化向导（设置 admin_key / api_key / 第一个渠道），仅当 admin_key 未设置时对远程开放，初始化完成后自动关闭并回到常规鉴权
 - CI 流水线 `.github/workflows/ci.yml`：push / PR 上跑 `go vet`、`gofmt`、`go test -race`、`go mod verify`，并交叉编译全部发布目标 + 构建 Docker 镜像（此前只有打 tag 时的 release 工作流，测试从不在合并前运行）
@@ -21,6 +20,9 @@
 - Gemini 不再套用 Anthropic 的 `max_tokens` 默认值（4096）：Gemini 本身不要求该字段且默认用模型上限，之前会让未设上限的请求被静默截断
 - 工具链版本统一：`go.mod` 声明 `go 1.26`，CI 改用 `go-version-file: go.mod` 读取，消除此前 go.mod 要求 1.26 而 CI 装 1.24 的分叉
 - `cooldowns.json` 移出版本控制并加入 `.gitignore`（该文件会写入上游 API Key）
+- 渠道重名校验：`config.Load` 拒绝重名渠道，并拒绝仅大小写不同的名字。渠道名是冷却状态、5xx 连击计数、探针健康与 per-channel 统计的 map key，重名会让两个渠道静默共享全部状态。管理台的新增/重命名路径同步改为大小写不敏感判断 —— 此前可以从 UI 存进一份下次启动会被加载器拒绝的配置，导致服务无法用自己保存的状态启动
+- Release 工作流桌面版构建：`go install wails` 之后把 `GOPATH/bin` 加入 PATH（hosted runner 默认 PATH 里没有），并把版本钉在 v2.15.0 与 go.mod 一致（此前用浮动的 @latest）。修复 darwin/amd64 desktop 构建失败 "wails: command not found"
+
 
 ### Changed
 - 转换渠道遇到无法表达的特性（`tools` / `tool_choice`、多模态 `image_url` 等 content part、`response_format`、`n>1`）时不再静默丢弃后返回 200。这类请求被限制路由到 `openai` 类型渠道（原样透传）；若该模型没有 `openai` 渠道，返回 400 并点名具体特性与解决办法

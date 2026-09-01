@@ -115,7 +115,9 @@ jobs:
           CGO_ENABLED: 1
         shell: bash
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+          GOBIN="$(go env GOPATH)/bin"
+          export PATH="$GOBIN:$PATH"
           wails build -platform "$GOOS/$GOARCH" \
             -ldflags "${{ steps.meta.outputs.ldflags }}" \
             -o "RelayHub-${GOOS}-${GOARCH}"
