@@ -14,7 +14,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  LDFLAGS_PREFIX: -s -w -X github.com/local/proxy/internal/version.Version=${{ github.ref_name }} -X github.com/local/proxy/internal/version.Commit=${{ github.sha }}
   VERSION: ${{ github.ref_name }}
 
 jobs:
@@ -102,7 +101,7 @@ jobs:
           go install github.com/wailsapp/wails/v2/cmd/wails@latest
           wails build -platform "$GOOS/$GOARCH" \
             -ldflags "${{ steps.meta.outputs.ldflags }}" \
-            -o "ProxyDesktop-${GOOS}-${GOARCH}"
+            -o "RelayHub-${GOOS}-${GOARCH}"
           echo "buildtype=desktop" >> "$GITHUB_OUTPUT"
 
       # ── Linux desktop runner has no GUI: skip, headless covers it ───
@@ -123,10 +122,11 @@ jobs:
         run: |
           EXT=""
           [ "$GOOS" = "windows" ] && EXT=".exe"
-          LDFLAGS="-H windowsgui ${{ steps.meta.outputs.ldflags }}"
+          LDFLAGS="${{ steps.meta.outputs.ldflags }}"
+          [ "$GOOS" = "windows" ] && LDFLAGS="-H windowsgui $LDFLAGS"
           go build -tags=production \
             -ldflags "$LDFLAGS" \
-            -o "proxy-headless-${GOOS}-${GOARCH}${EXT}" \
+            -o "relayhub-headless-${GOOS}-${GOARCH}${EXT}" \
             ./cmd/headless
           echo "buildtype=headless" >> "$GITHUB_OUTPUT"
 
@@ -136,8 +136,8 @@ jobs:
         with:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.meta.outputs.buildtype || 'skip' }}
           path: |
-            ProxyDesktop-*
-            proxy-headless-*
+            RelayHub-*
+            relayhub-headless-*
           if-no-files-found: warn
 
   publish:
@@ -151,7 +151,7 @@ jobs:
 
       - name: Create GitHub Release
         env:
-          GH_TOKEN: *** github.token }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "${GITHUB_REF_NAME}" dist/**/* \
             --title "${GITHUB_REF_NAME}" \
