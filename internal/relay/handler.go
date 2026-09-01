@@ -377,9 +377,9 @@ func (h *Handler) tryAttempt(
 	case config.TypeOpenAI:
 		return h.relayOpenAI(writer, request, body, attempt)
 	case config.TypeAnthropic:
-		return h.relayAnthropic(writer, body, attempt)
+		return h.relayAnthropic(writer, request, body, attempt)
 	case config.TypeGemini:
-		return h.relayGemini(writer, body, attempt)
+		return h.relayGemini(writer, request, body, attempt)
 	default:
 		return attemptResult{outcome: outcomeFailed, err: fmt.Errorf("unknown channel type %q", attempt.channel.Type)}
 	}
