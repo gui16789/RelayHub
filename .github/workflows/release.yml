@@ -87,6 +87,13 @@ jobs:
           echo "ver=$VER" >> "$GITHUB_OUTPUT"
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "builddate=$BUILDTIME" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.desktop }}" = "true" ] && [ "${{ matrix.runner }}" != "ubuntu-latest" ]; then
+            echo "buildtype=desktop" >> "$GITHUB_OUTPUT"
+          elif [ "${{ matrix.desktop }}" = "true" ]; then
+            echo "buildtype=skip" >> "$GITHUB_OUTPUT"
+          else
+            echo "buildtype=headless" >> "$GITHUB_OUTPUT"
+          fi
           echo "ldflags=-s -w -X github.com/local/relayhub/internal/version.Version=$VER -X github.com/local/relayhub/internal/version.Commit=$COMMIT -X github.com/local/relayhub/internal/version.BuildTime=$BUILDTIME" >> "$GITHUB_OUTPUT"
 
       # ── Desktop (Wails) build ────────────────────────────────────────
@@ -102,7 +109,6 @@ jobs:
           wails build -platform "$GOOS/$GOARCH" \
             -ldflags "${{ steps.meta.outputs.ldflags }}" \
             -o "RelayHub-${GOOS}-${GOARCH}"
-          echo "buildtype=desktop" >> "$GITHUB_OUTPUT"
 
       # ── Linux desktop runner has no GUI: skip, headless covers it ───
       - name: Skip desktop on Linux
@@ -113,7 +119,7 @@ jobs:
 
       # ── Headless build (cross-compile, no GUI deps) ──────────────────
       - name: Build headless
-        if: !matrix.desktop
+        if: matrix.desktop == false
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -128,7 +134,6 @@ jobs:
             -ldflags "$LDFLAGS" \
             -o "relayhub-headless-${GOOS}-${GOARCH}${EXT}" \
             ./cmd/headless
-          echo "buildtype=headless" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifacts
         if: always()
