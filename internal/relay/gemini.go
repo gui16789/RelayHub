@@ -133,10 +133,14 @@ func (h *Handler) relayGemini(
 
 func buildGeminiRequest(request chatRequest) *geminiRequest {
 	result := &geminiRequest{}
+	// Only forward a token cap the client actually asked for. Gemini does not
+	// require maxOutputTokens and defaults to the model's own limit, so
+	// substituting Anthropic's mandatory-field default here would silently
+	// truncate generations at 4096 tokens. omitempty drops the zero value.
 	generationConfig := &geminiGenConfig{
 		Temperature:     request.Temperature,
 		TopP:            request.TopP,
-		MaxOutputTokens: request.effectiveMaxTokens(),
+		MaxOutputTokens: request.requestedMaxTokens(),
 	}
 	switch stops := request.Stop.(type) {
 	case string:

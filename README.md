@@ -10,7 +10,8 @@
 ## 特性
 
 - 纯 Go + Wails 原生桌面应用（另有无头服务模式）
-- 多渠道 LLM 转发：OpenAI 兼容原样透传，Anthropic / Gemini 自动做格式转换（含流式）
+- 多渠道 LLM 转发：OpenAI 兼容原样透传，Anthropic / Gemini 自动做纯文本格式转换（含流式，
+  能力边界见下文「转换渠道的能力边界」）
 - 支持端点：`/v1/chat/completions`、`/v1/responses`、`/v1/embeddings`、`/v1/images/*`、`/v1/audio/*`、`/v1/moderations`、`/v1/models`
 - 密钥轮询、失败自动降级、429/5xx 冷却、Retry-After 感知
 - 后台健康探针（并发探测，故障通道自动摘除/恢复）
@@ -118,8 +119,26 @@ channels:
 | 渠道       | 类型      | 说明                                       |
 |------------|-----------|--------------------------------------------|
 | OpenAI     | openai    | OpenAI 兼容站点，所有 /v1/* 端点原样透传   |
-| Anthropic  | anthropic | 自动转换（仅 /v1/chat/completions）        |
-| Gemini     | gemini    | 自动转换（仅 /v1/chat/completions）        |
+| Anthropic  | anthropic | 纯文本转换（仅 /v1/chat/completions）      |
+| Gemini     | gemini    | 纯文本转换（仅 /v1/chat/completions）      |
+
+### 转换渠道的能力边界
+
+`anthropic` / `gemini` 渠道的格式转换覆盖纯文本对话（含流式）、`temperature`、
+`top_p`、`max_tokens`，以及 Gemini 的 `stop`。但转换器是在重建上游请求体，
+所以下列特性**无法**通过这两类渠道表达：
+
+- `tools` / `tool_choice`（函数调用）
+- 多模态内容（`image_url` 等非文本 content part）
+- `response_format`（`json_object` / `json_schema`）
+- `n > 1`（多候选回复）
+
+请求用到这些特性时，代理会自动把它**只路由到 `openai` 类型渠道**（原样透传，
+天然支持）。如果该模型没有任何 `openai` 渠道，请求会返回 400 并点名具体是哪个
+特性不被支持 —— 而不是静默丢弃后返回一个忽略了请求内容的 200。
+
+因此如果你要用函数调用或视觉能力，请为对应模型配一个 `openai` 类型的渠道
+（Anthropic 和 Gemini 都提供 OpenAI 兼容端点）。
 
 ---
 
