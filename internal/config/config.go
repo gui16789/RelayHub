@@ -197,7 +197,33 @@ func Load(path string) (*Config, error) {
 			return nil, err
 		}
 	}
+	if err := checkUniqueChannelNames(cfg.Channels); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+// checkUniqueChannelNames rejects duplicate channel names. The name is the key
+// under which the relay stores key cooldowns, 5xx streaks, probe health and
+// per-channel statistics, so two channels sharing one would silently share all
+// of it: cooling down a key on one would park it on the other, and their
+// request counts would merge. Comparison is case-insensitive because names
+// differing only in case are indistinguishable to an operator reading the
+// console, even though the maps would keep them apart.
+func checkUniqueChannelNames(channels []Channel) error {
+	seen := make(map[string]string, len(channels))
+	for _, channel := range channels {
+		folded := strings.ToLower(channel.Name)
+		previous, taken := seen[folded]
+		if taken && previous == channel.Name {
+			return fmt.Errorf("duplicate channel name %q: the name identifies cooldown, health and stats state, so it must be unique", channel.Name)
+		}
+		if taken {
+			return fmt.Errorf("channel names %q and %q differ only in case, which is too easy to confuse: rename one", previous, channel.Name)
+		}
+		seen[folded] = channel.Name
+	}
+	return nil
 }
 
 // expandEnv resolves ${VAR} / $VAR references in secret and endpoint fields

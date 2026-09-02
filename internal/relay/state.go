@@ -1,6 +1,8 @@
 package relay
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"math/rand"
@@ -43,8 +45,12 @@ const (
 
 type cooldownEntry struct {
 	channelName string
-	until       time.Time
-	kind        cooldownKind
+	// keyTail is the last 4 characters of the API key, kept for admin display.
+	// The key itself is only ever held as a fingerprint (see keyIdentity), so
+	// this is the sole human-recognizable remnant.
+	keyTail string
+	until   time.Time
+	kind    cooldownKind
 	// attempts counts consecutive quota strikes; it drives the backoff
 	// ladder and only resets after a successful request (half-open probe).
 	attempts int
@@ -94,10 +100,9 @@ func (s *State) Cooldowns() []CooldownInfo {
 			delete(s.disabled, identity)
 			continue
 		}
-		channelName, keyTail := splitIdentity(identity)
 		infos = append(infos, CooldownInfo{
-			Channel:  channelName,
-			KeyTail:  tail(keyTail, 4),
+			Channel:  entry.channelName,
+			KeyTail:  entry.keyTail,
 			Until:    entry.until,
 			RemainMS: entry.until.Sub(now).Milliseconds(),
 			Kind:     string(entry.kind),
@@ -107,7 +112,8 @@ func (s *State) Cooldowns() []CooldownInfo {
 	return infos
 }
 
-func splitIdentity(identity string) (channelName, apiKey string) {
+// splitIdentity recovers the channel name and key fingerprint from a map key.
+func splitIdentity(identity string) (channelName, fingerprint string) {
 	parts := strings.SplitN(identity, "\x00", 2)
 	if len(parts) == 2 {
 		return parts[0], parts[1]
@@ -115,8 +121,18 @@ func splitIdentity(identity string) (channelName, apiKey string) {
 	return identity, ""
 }
 
+// keyFingerprint is a one-way, truncated SHA-256 of an API key. It is what
+// identifies a key everywhere in this package, which is what lets the quota
+// cooldown file be written without ever putting a usable credential on disk.
+// 64 bits is far beyond what a handful of keys per channel needs to avoid
+// collisions, and stays short enough for the file to remain readable.
+func keyFingerprint(apiKey string) string {
+	sum := sha256.Sum256([]byte(apiKey))
+	return hex.EncodeToString(sum[:8])
+}
+
 func keyIdentity(channelName, apiKey string) string {
-	return channelName + "\x00" + apiKey
+	return channelName + "\x00" + keyFingerprint(apiKey)
 }
 
 // OrderedKeys returns the channel's usable keys in the order the router should
@@ -163,6 +179,7 @@ func (s *State) Penalize(channelName, apiKey string, duration time.Duration) {
 	defer s.mu.Unlock()
 	s.disabled[keyIdentity(channelName, apiKey)] = cooldownEntry{
 		channelName: channelName,
+		keyTail:     tail(apiKey, 4),
 		until:       time.Now().Add(duration),
 		kind:        cooldownRate,
 	}
@@ -189,6 +206,7 @@ func (s *State) PenalizeQuota(channelName, apiKey string, resetHint time.Duratio
 	identity := keyIdentity(channelName, apiKey)
 	entry := s.disabled[identity]
 	entry.channelName = channelName
+	entry.keyTail = tail(apiKey, 4)
 	entry.kind = cooldownQuota
 	entry.attempts++
 
@@ -319,12 +337,22 @@ func (s *State) PruneHealth(live map[string]bool) {
 // persistedCooldown is the on-disk shape of a quota cooldown. Only quota
 // entries are persisted: short rate-limit rests are over by the time a
 // restarted process could act on them anyway.
+//
+// No usable credential is stored. KeyHash is the one-way fingerprint that
+// identifies the key in memory, so a restored entry re-attaches to the right
+// key without the file ever holding something an attacker could spend.
 type persistedCooldown struct {
 	Channel  string    `json:"channel"`
 	KeyTail  string    `json:"key_tail"` // last 4 chars, for admin display only
-	Key      string    `json:"key"`
+	KeyHash  string    `json:"key_hash"`
 	Until    time.Time `json:"until"`
 	Attempts int       `json:"attempts"`
+
+	// LegacyKey reads the plaintext `key` field written by versions before
+	// fingerprinting. It exists only so an upgrade can migrate those entries
+	// instead of dropping them, which would wake every exhausted key at once.
+	// It is never written back; see persistLocked.
+	LegacyKey string `json:"key,omitempty"`
 }
 
 type cooldownSnapshot struct {
@@ -354,16 +382,38 @@ func (s *State) loadPersisted() error {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	migrated := 0
 	for _, entry := range snapshot.Quota {
-		if !now.Before(entry.Until) || entry.Key == "" {
+		if !now.Before(entry.Until) {
 			continue
 		}
-		s.disabled[keyIdentity(entry.Channel, entry.Key)] = cooldownEntry{
+		fingerprint := entry.KeyHash
+		keyTail := entry.KeyTail
+		if fingerprint == "" {
+			// Pre-fingerprint file: derive the identity from the plaintext key
+			// this once, so the cooldown survives the upgrade.
+			if entry.LegacyKey == "" {
+				continue
+			}
+			fingerprint = keyFingerprint(entry.LegacyKey)
+			if keyTail == "" {
+				keyTail = tail(entry.LegacyKey, 4)
+			}
+			migrated++
+		}
+		s.disabled[entry.Channel+"\x00"+fingerprint] = cooldownEntry{
 			channelName: entry.Channel,
+			keyTail:     keyTail,
 			until:       entry.Until,
 			kind:        cooldownQuota,
 			attempts:    entry.Attempts,
 		}
+	}
+	if migrated > 0 {
+		// Rewrite immediately so the plaintext keys leave the disk now rather
+		// than whenever the next quota strike happens to trigger a write.
+		slog.Info("migrated plaintext cooldown entries to fingerprints", "count", migrated)
+		s.persistLocked()
 	}
 	return nil
 }
@@ -381,11 +431,11 @@ func (s *State) persistLocked() {
 		if entry.kind != cooldownQuota || !now.Before(entry.until) {
 			continue
 		}
-		channelName, apiKey := splitIdentity(identity)
+		channelName, fingerprint := splitIdentity(identity)
 		snapshot.Quota = append(snapshot.Quota, persistedCooldown{
 			Channel:  channelName,
-			KeyTail:  tail(apiKey, 4),
-			Key:      apiKey,
+			KeyTail:  entry.keyTail,
+			KeyHash:  fingerprint,
 			Until:    entry.until,
 			Attempts: entry.attempts,
 		})

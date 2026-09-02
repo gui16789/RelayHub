@@ -63,18 +63,18 @@ jobs:
             goarch: arm64
             desktop: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       # Read the version from go.mod so the toolchain can never drift from
       # what the module actually requires.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -107,6 +107,10 @@ jobs:
         run: echo "CGO_LDFLAGS=-framework UniformTypeIdentifiers" >> "$GITHUB_ENV"
 
       # ── Desktop (Wails) build ────────────────────────────────────────
+      # Install the Wails CLI *natively* for the runner host: the GOOS/GOARCH
+      # env below targets the app build, and leaking it into `go install`
+      # cross-compiles the CLI itself (e.g. amd64 on an arm64 macos runner),
+      # which then cannot run and fails with "wails: command not found".
       - name: Build desktop (Wails)
         if: matrix.desktop && matrix.runner != 'ubuntu-latest'
         env:
@@ -115,10 +119,42 @@ jobs:
           CGO_ENABLED: 1
         shell: bash
         run: |
-          go install github.com/wailsapp/wails/v2/cmd/wails@latest
+          GOOS= GOARCH= CGO_ENABLED=0 \
+            go install github.com/wailsapp/wails/v2/cmd/wails@v2.15.0
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          if ! command -v wails >/dev/null; then
+            echo "::error::wails CLI not found after go install"
+            ls -la "$(go env GOPATH)/bin" || true
+            exit 1
+          fi
           wails build -platform "$GOOS/$GOARCH" \
             -ldflags "${{ steps.meta.outputs.ldflags }}" \
             -o "RelayHub-${GOOS}-${GOARCH}"
+
+          # Wails v2 ignores -o and always writes under build/bin/ (bare exe
+          # on Windows, .app bundle on macOS). Normalize the artifact to the
+          # repo root under a stable name so the upload step can find it.
+          case "$GOOS" in
+            windows)
+              BIN="$(ls build/bin/RelayHub-windows-${GOARCH}* 2>/dev/null | head -1)"
+              if [ -z "$BIN" ]; then
+                echo "::error::expected build/bin/RelayHub-windows-${GOARCH}*"
+                ls -la build/bin
+                exit 1
+              fi
+              cp "$BIN" "RelayHub-windows-${GOARCH}.exe"
+              ;;
+            darwin)
+              if [ ! -d build/bin/RelayHub.app ]; then
+                echo "::error::expected build/bin/RelayHub.app"
+                ls -la build/bin
+                exit 1
+              fi
+              ditto -c -k --sequesterRsrc --keepParent \
+                build/bin/RelayHub.app "RelayHub-darwin-${GOARCH}.app.zip"
+              ;;
+          esac
+          ls -la
 
       # ── Linux desktop runner has no GUI: skip, headless covers it ───
       - name: Skip desktop on Linux
@@ -149,20 +185,20 @@ jobs:
 
       - name: Upload artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}-${{ steps.meta.outputs.buildtype || 'skip' }}
           path: |
             RelayHub-*
             relayhub-headless-*
-          if-no-files-found: warn
+          if-no-files-found: ${{ matrix.desktop && matrix.runner != 'ubuntu-latest' && 'error' || 'warn' }}
 
   publish:
     needs: build
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
 

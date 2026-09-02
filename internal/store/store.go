@@ -185,8 +185,8 @@ func (s *Store) AddChannel(channel config.Channel) error {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.indexOfLocked(channel.Name) >= 0 {
-		return fmt.Errorf("channel %q already exists", channel.Name)
+	if existing, conflict := s.nameConflictLocked(channel.Name, -1); conflict {
+		return fmt.Errorf("channel %q already exists", existing)
 	}
 	s.cfg.Channels = append(s.cfg.Channels, cloneChannel(channel))
 	return s.saveLocked()
@@ -212,8 +212,8 @@ func (s *Store) UpdateChannel(originalName string, channel config.Channel) error
 	if err := config.ValidateChannel(&channel); err != nil {
 		return err
 	}
-	if channel.Name != originalName && s.indexOfLocked(channel.Name) >= 0 {
-		return fmt.Errorf("channel %q already exists", channel.Name)
+	if existing, conflict := s.nameConflictLocked(channel.Name, index); conflict {
+		return fmt.Errorf("channel %q already exists", existing)
 	}
 	s.cfg.Channels[index] = cloneChannel(channel)
 	return s.saveLocked()
@@ -291,6 +291,24 @@ func (s *Store) indexOfLocked(name string) int {
 		}
 	}
 	return -1
+}
+
+// nameConflictLocked reports an existing channel whose name collides with the
+// candidate, ignoring the channel at skipIndex (pass -1 to check all). The
+// comparison is case-insensitive to match config.Load's validation: without
+// that, the console could write a config that the loader then refuses on the
+// next start, leaving the proxy unable to boot from its own saved state.
+func (s *Store) nameConflictLocked(name string, skipIndex int) (string, bool) {
+	folded := strings.ToLower(name)
+	for i, channel := range s.cfg.Channels {
+		if i == skipIndex {
+			continue
+		}
+		if strings.ToLower(channel.Name) == folded {
+			return channel.Name, true
+		}
+	}
+	return "", false
 }
 
 func (s *Store) saveLocked() error {

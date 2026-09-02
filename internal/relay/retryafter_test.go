@@ -180,7 +180,8 @@ func TestQuotaExhaustionBackoffLadder(t *testing.T) {
 	}
 }
 
-// Quota cooldowns must survive a simulated restart via the persistence file.
+// Quota cooldowns must survive a simulated restart via the persistence file,
+// and must do so without writing a usable credential to disk.
 func TestQuotaCooldownPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cooldowns.json")
 
@@ -193,8 +194,17 @@ func TestQuotaCooldownPersistence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("persistence file missing: %v", err)
 	}
-	if !strings.Contains(string(raw), "sk-persisted") {
-		t.Fatalf("quota entry not persisted: %s", raw)
+	// The security property: the file identifies the key by fingerprint, so
+	// the key itself must not appear anywhere in it.
+	if strings.Contains(string(raw), "sk-persisted") {
+		t.Errorf("plaintext key must never be persisted: %s", raw)
+	}
+	if !strings.Contains(string(raw), keyFingerprint("sk-persisted")) {
+		t.Errorf("fingerprint missing, entry cannot be restored: %s", raw)
+	}
+	// The tail is still there so the console can name the key for an operator.
+	if !strings.Contains(string(raw), `"key_tail": "sted"`) {
+		t.Errorf("key_tail missing, admin console cannot identify the key: %s", raw)
 	}
 	if strings.Contains(string(raw), "sk-short") {
 		t.Fatalf("rate-limit entry must not persist: %s", raw)
@@ -205,6 +215,51 @@ func TestQuotaCooldownPersistence(t *testing.T) {
 	keys := restored.OrderedKeys(config.Channel{Name: "ch", APIKeys: []string{"sk-persisted", "sk-short"}}, config.KeyStrategyRoundRobin)
 	if len(keys) != 1 || keys[0] != "sk-short" {
 		t.Fatalf("restored keys = %v, want only sk-short usable", keys)
+	}
+	// The restored entry must still be attributable in the console.
+	cooldowns := restored.Cooldowns()
+	if len(cooldowns) != 1 || cooldowns[0].KeyTail != "sted" || cooldowns[0].Channel != "ch" {
+		t.Errorf("restored cooldown lost its identity: %+v", cooldowns)
+	}
+}
+
+// A cooldowns.json written before fingerprinting carries plaintext keys. It
+// must still restore (otherwise an upgrade wakes every exhausted key at once)
+// and the plaintext must be gone from disk once it has.
+func TestLegacyPlaintextCooldownMigrates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cooldowns.json")
+	until := time.Now().Add(time.Hour).Format(time.RFC3339Nano)
+	legacy := `{"quota":[{"channel":"ch","key_tail":"key1","key":"sk-legacy-key1",` +
+		`"until":"` + until + `","attempts":2}]}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	state := NewState()
+	state.SetPersistence(path)
+
+	// The key is still parked, so it must be filtered out of the try order.
+	keys := state.OrderedKeys(
+		config.Channel{Name: "ch", APIKeys: []string{"sk-legacy-key1", "sk-other"}},
+		config.KeyStrategyRoundRobin)
+	if len(keys) != 1 || keys[0] != "sk-other" {
+		t.Fatalf("legacy cooldown not honored, keys = %v", keys)
+	}
+	// The strike count has to survive too, or the backoff ladder restarts.
+	cooldowns := state.Cooldowns()
+	if len(cooldowns) != 1 || cooldowns[0].Attempts != 2 {
+		t.Errorf("legacy attempts lost: %+v", cooldowns)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "sk-legacy-key1") {
+		t.Errorf("migration must rewrite the file without the plaintext key: %s", raw)
+	}
+	if !strings.Contains(string(raw), keyFingerprint("sk-legacy-key1")) {
+		t.Errorf("migrated entry should carry the fingerprint: %s", raw)
 	}
 }
 
