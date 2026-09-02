@@ -198,6 +198,12 @@ jobs:
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
+      # gh release create --generate-notes derives notes from git history, so
+      # it needs a repository (full history for meaningful notes).
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
