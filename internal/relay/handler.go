@@ -53,6 +53,14 @@ type Handler struct {
 	probeMu     sync.Mutex
 	healthProbe HealthProbeFunc
 	probeStop   chan struct{}
+
+	// breaker prevents a single request from exhausting all keys in a
+	// channel during rate limit storms.
+	breaker *CircuitBreaker
+
+	// cache stores responses for identical requests to reduce upstream load.
+	cache       *ResponseCache
+	cacheConfig CacheConfig
 }
 
 func NewHandler(source ConfigSource, collector *stats.Collector) *Handler {
@@ -69,14 +77,29 @@ func NewHandler(source ConfigSource, collector *stats.Collector) *Handler {
 		TLSHandshakeTimeout:   15 * time.Second,
 		ExpectContinueTimeout: 5 * time.Second,
 	}
-	return &Handler{
-		source: source,
-		state:  NewState(),
-		stats:  collector,
-		client: &http.Client{Transport: transport, Timeout: 5 * time.Minute},
+	h := &Handler{
+		source:      source,
+		state:       NewState(),
+		stats:       collector,
+		breaker:     NewCircuitBreaker(),
+		cache:       NewResponseCache(),
+		cacheConfig: DefaultCacheConfig(),
+		client:      &http.Client{Transport: transport, Timeout: 5 * time.Minute},
 		// ResponseHeaderTimeout only: an upstream that never starts
 		// answering still gives up, but an open stream may run for hours.
 		streamClient: &http.Client{Transport: transport, Timeout: 0},
+	}
+	// Start background cache eviction (every 5 minutes)
+	go h.cacheEvictionLoop()
+	return h
+}
+
+// cacheEvictionLoop removes expired cache entries periodically.
+func (h *Handler) cacheEvictionLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		h.cache.Evict()
 	}
 }
 
@@ -109,6 +132,47 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if err := json.Unmarshal(body, &parsed); err != nil || parsed.Model == "" {
 		http.Error(writer, "invalid chat completion request: missing model", http.StatusBadRequest)
 		return
+	}
+
+	// Determine if this request is cacheable and get the appropriate TTL.
+	endpoint := request.URL.Path
+	cacheTTL := h.getCacheTTL(endpoint, &parsed)
+
+	// Try cache first if this endpoint is cacheable.
+	if cacheTTL > 0 {
+		if cached, ok := h.cache.Get(endpoint, parsed.Model, body); ok {
+			// Cache hit: serve from cache
+			writer.Header().Set("Content-Type", cached.contentType)
+			writer.Header().Set("X-Cache", "HIT")
+			writer.WriteHeader(cached.status)
+			writer.Write(cached.response)
+			h.stats.RecordRequest()
+			h.stats.RecordTokens("cache", cached.promptTokens, cached.completionTokens)
+			slog.Debug("cache hit", "endpoint", endpoint, "model", parsed.Model)
+			return
+		}
+
+		// Check if another goroutine is already fetching this (request coalescing)
+		if _, won := h.cache.StartInflight(endpoint, parsed.Model, body); !won {
+			// Lost the race: another goroutine is fetching, wait for it
+			slog.Debug("request coalescing: waiting for inflight request", "endpoint", endpoint, "model", parsed.Model)
+			if cached, ok := h.cache.Get(endpoint, parsed.Model, body); ok {
+				// The inflight request completed successfully
+				writer.Header().Set("Content-Type", cached.contentType)
+				writer.Header().Set("X-Cache", "HIT-COALESCED")
+				writer.WriteHeader(cached.status)
+				writer.Write(cached.response)
+				h.stats.RecordRequest()
+				h.stats.RecordTokens("cache", cached.promptTokens, cached.completionTokens)
+				slog.Debug("cache hit from coalesced request", "endpoint", endpoint, "model", parsed.Model)
+				return
+			}
+			// Inflight request failed, fall through to normal fetch
+		} else {
+			// Won the race: we're responsible for fetching and caching
+			defer h.cache.FinishInflight(endpoint, parsed.Model, body)
+			// Continue to normal fetch logic below, will cache on success
+		}
 	}
 
 	h.stats.RecordRequest()
@@ -224,10 +288,19 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		switch result.outcome {
 		case outcomeServed:
 			h.stats.RecordAttempt(attempt.channel.Name, true)
+			h.breaker.RecordSuccess(attempt.channel.Name)
 			if result.promptTokens > 0 || result.completionTokens > 0 {
 				h.stats.RecordTokens(attempt.channel.Name, result.promptTokens, result.completionTokens)
 			}
 			servedPrompt, servedCompletion = result.promptTokens, result.completionTokens
+
+			// Cache the successful response if cacheable
+			if cacheTTL > 0 && !parsed.Stream {
+				h.cache.Set(endpoint, parsed.Model, body, result.body, result.status,
+					result.contentType, result.promptTokens, result.completionTokens, cacheTTL)
+				slog.Debug("cached response", "endpoint", endpoint, "model", parsed.Model, "ttl", cacheTTL)
+			}
+
 			finishTrace(http.StatusOK, attempt.channel.Name)
 			return
 		case outcomeAborted:
@@ -245,6 +318,14 @@ func (h *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		case outcomeFailed:
 			lastErr = result.err
 			h.stats.RecordAttempt(attempt.channel.Name, false)
+			// If this is a rate limit or server error, record it for circuit breaking.
+			if result.status == http.StatusTooManyRequests || result.status >= 500 {
+				if h.breaker.RecordFailure(attempt.channel.Name) {
+					h.stats.PushEvent("warn", attempt.channel.Name,
+						"circuit breaker tripped after rate limit storm, cooling down 15s")
+					slog.Warn("circuit breaker tripped", "channel", attempt.channel.Name)
+				}
+			}
 			h.stats.PushEvent("warn", attempt.channel.Name, "failover: "+errText(result.err))
 			slog.Warn("failover", "channel", attempt.channel.Name, "key_tail", tail(attempt.apiKey, 4), "err", result.err)
 		}
@@ -290,11 +371,19 @@ type attempt struct {
 // buildAttempts expands every candidate channel into per-key attempts,
 // honoring priority order and round-robin key rotation. Channels the
 // background health probe has marked down are skipped: a freshly-probed
-// dead upstream must not absorb one failed attempt per request.
+// dead upstream must not absorb one failed attempt per request. Channels
+// with a tripped circuit breaker are also skipped to prevent exhausting
+// all keys during rate limit storms.
 func (h *Handler) buildAttempts(snapshot *config.Config, model string, openAIOnly bool) []attempt {
 	var attempts []attempt
 	for _, channel := range snapshot.CandidateChannels(model) {
 		if h.state.IsDown(channel.Name) {
+			continue
+		}
+		// Skip channels with a tripped circuit breaker: they just hit a
+		// wave of 429s/5xx and need time to recover.
+		if h.breaker.IsTripped(channel.Name) {
+			slog.Debug("circuit breaker tripped, skipping channel", "channel", channel.Name)
 			continue
 		}
 		if openAIOnly && channel.Type != config.TypeOpenAI {
@@ -327,8 +416,9 @@ type attemptResult struct {
 	// status and body carry the upstream error through for the aborted
 	// (client-error) path so it can be echoed back to the caller instead of
 	// leaving the response empty.
-	status int
-	body   []byte
+	status      int
+	body        []byte
+	contentType string
 	// promptTokens/completionTokens are the upstream-reported usage of a
 	// served request; zero means the upstream did not report it.
 	promptTokens     int

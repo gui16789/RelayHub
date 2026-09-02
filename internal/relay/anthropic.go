@@ -105,7 +105,7 @@ func (h *Handler) relayAnthropic(
 		}
 	}
 
-	writeJSONResponse(writer, chatCompletionResponse{
+	responseBody := chatCompletionResponse{
 		ID:      completionID,
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
@@ -120,9 +120,13 @@ func (h *Handler) relayAnthropic(
 			CompletionTokens: completionTokens,
 			TotalTokens:      promptTokens + completionTokens,
 		},
-	})
+	}
+	responseBytes := writeJSONResponseWithBody(writer, responseBody)
 	return attemptResult{
 		outcome:          outcomeServed,
+		body:             responseBytes,
+		status:           http.StatusOK,
+		contentType:      "application/json",
 		promptTokens:     promptTokens,
 		completionTokens: completionTokens,
 	}

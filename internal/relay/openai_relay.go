@@ -108,6 +108,9 @@ func (h *Handler) copyBufferedWithUsage(writer http.ResponseWriter, upstreamResp
 	}
 	return attemptResult{
 		outcome:          outcomeServed,
+		body:             raw,
+		status:           upstreamResponse.StatusCode,
+		contentType:      upstreamResponse.Header.Get("Content-Type"),
 		promptTokens:     prompt,
 		completionTokens: completion,
 	}

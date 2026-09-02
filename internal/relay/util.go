@@ -28,6 +28,16 @@ func writeJSONResponse(writer http.ResponseWriter, payload any) {
 	_ = json.NewEncoder(writer).Encode(payload)
 }
 
+// writeJSONResponseWithBody writes a JSON response and returns the serialized
+// body for caching purposes.
+func writeJSONResponseWithBody(writer http.ResponseWriter, payload any) []byte {
+	body := mustJSON(payload)
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	writer.Write(body)
+	return body
+}
+
 func setStreamingHeaders(writer http.ResponseWriter) {
 	writer.Header().Set("Content-Type", "text/event-stream")
 	writer.Header().Set("Cache-Control", "no-cache")
