@@ -572,34 +572,42 @@ func classifyUpstream(response *http.Response, body string) (outcomeKind, time.D
 	}
 }
 
-// quotaKeywords mark a 429 as quota exhaustion (a billing/usage window that
-// must refill) rather than a transient rate limit. SenseNova reports quota
-// exhaustion with messages like "quota ... exhausted"; OpenAI-style
-// upstreams use codes such as insufficient_quota.
+// quotaKeywords mark a 429 as quota exhaustion (a billing/token-per-minute
+// window that must refill) rather than a transient rate limit. SenseNova
+// reports TPM exhaustion as code ModelAccountTpmRateLimitExceeded with body
+// "inference tpm exhausted" — matched via the specific phrases below, since a
+// bare "tpm" substring appears in both quota and transient rate-limit
+// wording. OpenAI-style upstreams use codes such as insufficient_quota.
 var quotaKeywords = []string{
 	"quota", "额度", "insufficient_quota", "billing", "usage limit",
 	"daily limit", "monthly limit", "resource_exhausted",
+	// SenseNova: ModelAccountTpmRateLimitExceeded / "inference tpm exhausted".
+	"modelaccount", "tpm exhausted", "tokens per minute",
 }
 
 // rateKeywords mark a 429 as a transient rate limit (QPS/RPM/TPM), checked
-// BEFORE quota keywords so "rate limit" never trips the "limit" substring.
+// AFTER quota keywords: an explicit quota/exhaustion marker must win — e.g.
+// SenseNova's ModelAccountTpmRateLimitExceeded would otherwise trip the
+// "ratelimit" substring inside its own error code.
 var rateKeywords = []string{
 	"rate limit", "ratelimit", "qps", "rpm", "tpm", "concurrent", "too many requests",
 }
 
-// isQuotaExhausted classifies a 429 body. An explicit rate-limit marker
-// wins; a quota marker without one means the window must refill; an
-// unclassified 429 stays a (short) rate limit so we keep retrying soon.
+// isQuotaExhausted classifies a 429 body. An explicit quota/exhaustion
+// marker wins (the window must refill, so the key is parked on the backoff
+// ladder rather than retried after a short cooldown); an explicit rate-limit
+// marker without one means transient; an unclassified 429 stays a (short)
+// rate limit so we keep retrying soon.
 func isQuotaExhausted(response *http.Response, body string) bool {
 	lower := strings.ToLower(body)
-	for _, keyword := range rateKeywords {
-		if strings.Contains(lower, keyword) {
-			return false
-		}
-	}
 	for _, keyword := range quotaKeywords {
 		if strings.Contains(lower, keyword) {
 			return true
+		}
+	}
+	for _, keyword := range rateKeywords {
+		if strings.Contains(lower, keyword) {
+			return false
 		}
 	}
 	return false

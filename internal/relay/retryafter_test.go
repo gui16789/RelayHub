@@ -107,6 +107,25 @@ func TestClassifyUpstream429(t *testing.T) {
 		}
 	})
 
+	// SenseNova reports account-level TPM exhaustion as
+	// ModelAccountTpmRateLimitExceeded. Its error code contains the substring
+	// "ratelimit" and its message contains "tpm", so it must be classified
+	// by the explicit modelaccount/tpm-exhausted markers BEFORE the generic
+	// transient limits — otherwise it is retried every 60s on a window that
+	// never refills that fast.
+	t.Run("sensenova tpm exhaustion triggers quota backoff", func(t *testing.T) {
+		_, cooldown, message := classifyUpstream(&http.Response{
+			StatusCode: http.StatusTooManyRequests,
+			Header:     make(http.Header),
+		}, `{"error":{"message":"inference tpm exhausted","type":"invalid_request_error","code":"ModelAccountTpmRateLimitExceeded"}}`)
+		if cooldown != cooldownUseQuotaBackoff {
+			t.Errorf("cooldown = %v, want quota backoff sentinel", cooldown)
+		}
+		if message == "" {
+			t.Error("message empty")
+		}
+	})
+
 	t.Run("auth errors unaffected", func(t *testing.T) {
 		_, cooldown, _ := classifyUpstream(&http.Response{
 			StatusCode: http.StatusUnauthorized,
