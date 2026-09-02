@@ -16,10 +16,10 @@ type CircuitBreaker struct {
 }
 
 type breakerEntry struct {
-	failures   int
-	lastFail   time.Time
-	trippedAt  time.Time
-	isTripped  bool
+	failures  int
+	lastFail  time.Time
+	trippedAt time.Time
+	isTripped bool
 }
 
 const (

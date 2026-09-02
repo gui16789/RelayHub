@@ -24,12 +24,12 @@ type ResponseCache struct {
 }
 
 type cacheEntry struct {
-	response     []byte
-	status       int
-	contentType  string
-	promptTokens int
+	response         []byte
+	status           int
+	contentType      string
+	promptTokens     int
 	completionTokens int
-	expires      time.Time
+	expires          time.Time
 }
 
 // inflightEntry is a shared future: the first request goes upstream, and
@@ -57,8 +57,8 @@ type CacheConfig struct {
 // DefaultCacheConfig provides sensible cache TTLs.
 func DefaultCacheConfig() CacheConfig {
 	return CacheConfig{
-		EmbeddingsTTL:  24 * time.Hour, // embeddings for the same text never change
-		ModerationsTTL: 1 * time.Hour,  // moderation policies could update, but slowly
+		EmbeddingsTTL:  24 * time.Hour,  // embeddings for the same text never change
+		ModerationsTTL: 1 * time.Hour,   // moderation policies could update, but slowly
 		ChatTTL:        5 * time.Minute, // only for temperature=0 deterministic requests
 	}
 }
