@@ -8,6 +8,17 @@ server:
   admin_key: ""
   # 单个请求最多尝试的 渠道×密钥 组合数，0 = 不限制。
   max_attempts: 0
+  # key 轮询策略：round_robin（默认，每个请求换起始 key）| preferred_first
+  # （固定优先用第一个 key，失败/冷却时才降级到下一个）
+  key_strategy: round_robin
+  # 可选的系统级冷却默认值（每个渠道可单独覆盖，见渠道内 cooldowns）。
+  # 字段都用 Go 时长字符串，单位 s/m/h，0=继承内置默认。
+  cooldowns:
+    rate_limit: 60s      # 瞬时限流 429（无 Retry-After）时 key 冷却多久
+    quota_base: 5m       # 配额耗尽首次退避（连续命中逐次翻倍）
+    quota_max: 5h        # 配额退避上限
+    auth: 10m            # 401/403 无效 key 冷却
+    max_retry_after: 10m # 上游 Retry-After 提示的上限（防恶意超长）
   # 代理总开关（可通过管理控制台 /admin/ 切换，改动会自动写回本文件）
   enabled: true
 
@@ -43,6 +54,12 @@ channels:
     # 可选：附加请求头（Authorization / Content-Type 为保留头，不可覆盖）
     headers:
       X-Title: my-proxy
+    # 可选：本渠道的冷却覆盖（不写则继承 server.cooldowns；server 不写则
+    # 用内置默认）。典型场景：某个网关的 RPS 桶几秒就恢复，就不必让 key
+    # 睡满全局 60s。
+    cooldowns:
+      rate_limit: 5s
+      quota_max: 1h
 
   # Claude 原生协议站点：自动做 OpenAI <-> Anthropic 格式转换（含流式）
   - name: claude-official

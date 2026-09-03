@@ -37,7 +37,7 @@ func TestRetryAfterDuration(t *testing.T) {
 			if tc.header != "" {
 				header.Set("Retry-After", tc.header)
 			}
-			got := retryAfterDuration(&http.Response{StatusCode: http.StatusTooManyRequests, Header: header})
+			got := retryAfterDuration(&http.Response{StatusCode: http.StatusTooManyRequests, Header: header}, config.BuiltinCooldowns())
 			if got != tc.want {
 				t.Errorf("retryAfterDuration(%q) = %v, want %v", tc.header, got, tc.want)
 			}
@@ -48,7 +48,7 @@ func TestRetryAfterDuration(t *testing.T) {
 		when := time.Now().UTC().Add(30 * time.Second).UTC().Format(http.TimeFormat)
 		header := make(http.Header)
 		header.Set("Retry-After", when)
-		got := retryAfterDuration(&http.Response{StatusCode: http.StatusTooManyRequests, Header: header})
+		got := retryAfterDuration(&http.Response{StatusCode: http.StatusTooManyRequests, Header: header}, config.BuiltinCooldowns())
 		if got < 28*time.Second || got > 32*time.Second {
 			t.Errorf("http-date retry after = %v, want ~30s", got)
 		}
@@ -56,13 +56,14 @@ func TestRetryAfterDuration(t *testing.T) {
 }
 
 func TestClassifyUpstream429(t *testing.T) {
+	defaultCD := config.BuiltinCooldowns()
 	t.Run("honors seconds header", func(t *testing.T) {
 		header := make(http.Header)
 		header.Set("Retry-After", "30")
 		outcome, cooldown, message := classifyUpstream(&http.Response{
 			StatusCode: http.StatusTooManyRequests,
 			Header:     header,
-		}, "")
+		}, "", defaultCD)
 		if outcome != outcomeFailed {
 			t.Fatalf("outcome = %v, want outcomeFailed", outcome)
 		}
@@ -78,7 +79,7 @@ func TestClassifyUpstream429(t *testing.T) {
 		_, cooldown, _ := classifyUpstream(&http.Response{
 			StatusCode: http.StatusTooManyRequests,
 			Header:     make(http.Header),
-		}, "")
+		}, "", defaultCD)
 		if cooldown != quotaCooldown {
 			t.Errorf("cooldown = %v, want %v", cooldown, quotaCooldown)
 		}
@@ -88,7 +89,7 @@ func TestClassifyUpstream429(t *testing.T) {
 		_, cooldown, message := classifyUpstream(&http.Response{
 			StatusCode: http.StatusTooManyRequests,
 			Header:     make(http.Header),
-		}, `{"error":{"code":"DataQuotaExceed","message":"Data quota usage is exhausted."}}`)
+		}, `{"error":{"code":"DataQuotaExceed","message":"Data quota usage is exhausted."}}`, defaultCD)
 		if cooldown != cooldownUseQuotaBackoff {
 			t.Errorf("cooldown = %v, want quota backoff sentinel", cooldown)
 		}
@@ -101,7 +102,7 @@ func TestClassifyUpstream429(t *testing.T) {
 		_, cooldown, _ := classifyUpstream(&http.Response{
 			StatusCode: http.StatusTooManyRequests,
 			Header:     make(http.Header),
-		}, `{"error":{"message":"QPS rate limit exceeded"}}`)
+		}, `{"error":{"message":"QPS rate limit exceeded"}}`, defaultCD)
 		if cooldown != quotaCooldown {
 			t.Errorf("cooldown = %v, want %v (rate limit, not quota)", cooldown, quotaCooldown)
 		}
@@ -117,7 +118,7 @@ func TestClassifyUpstream429(t *testing.T) {
 		_, cooldown, message := classifyUpstream(&http.Response{
 			StatusCode: http.StatusTooManyRequests,
 			Header:     make(http.Header),
-		}, `{"error":{"message":"inference tpm exhausted","type":"invalid_request_error","code":"ModelAccountTpmRateLimitExceeded"}}`)
+		}, `{"error":{"message":"inference tpm exhausted","type":"invalid_request_error","code":"ModelAccountTpmRateLimitExceeded"}}`, defaultCD)
 		if cooldown != cooldownUseQuotaBackoff {
 			t.Errorf("cooldown = %v, want quota backoff sentinel", cooldown)
 		}
@@ -130,7 +131,7 @@ func TestClassifyUpstream429(t *testing.T) {
 		_, cooldown, _ := classifyUpstream(&http.Response{
 			StatusCode: http.StatusUnauthorized,
 			Header:     make(http.Header),
-		}, "")
+		}, "", defaultCD)
 		if cooldown != authCooldown {
 			t.Errorf("cooldown = %v, want %v", cooldown, authCooldown)
 		}
@@ -138,10 +139,11 @@ func TestClassifyUpstream429(t *testing.T) {
 }
 
 func TestQuotaResetHint(t *testing.T) {
+	maxCD := config.BuiltinCooldowns().QuotaMax.D()
 	t.Run("epoch seconds header", func(t *testing.T) {
 		header := make(http.Header)
 		header.Set("X-Quota-Reset", strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10))
-		got := quotaResetHint(&http.Response{Header: header}, "")
+		got := quotaResetHint(&http.Response{Header: header}, "", maxCD)
 		if got < 59*time.Minute || got > time.Hour {
 			t.Errorf("hint = %v, want ~1h", got)
 		}
@@ -150,7 +152,7 @@ func TestQuotaResetHint(t *testing.T) {
 	t.Run("duration seconds header", func(t *testing.T) {
 		header := make(http.Header)
 		header.Set("X-RateLimit-Reset", "120")
-		got := quotaResetHint(&http.Response{Header: header}, "")
+		got := quotaResetHint(&http.Response{Header: header}, "", maxCD)
 		if got != 120*time.Second {
 			t.Errorf("hint = %v, want 120s", got)
 		}
@@ -159,14 +161,14 @@ func TestQuotaResetHint(t *testing.T) {
 	t.Run("json body reset_at", func(t *testing.T) {
 		reset := time.Now().Add(30 * time.Minute).Unix()
 		body := `{"error":{"message":"quota exhausted","reset_at":` + strconv.FormatInt(reset, 10) + `}}`
-		got := quotaResetHint(&http.Response{Header: make(http.Header)}, body)
+		got := quotaResetHint(&http.Response{Header: make(http.Header)}, body, maxCD)
 		if got < 29*time.Minute || got > 30*time.Minute {
 			t.Errorf("hint = %v, want ~30m", got)
 		}
 	})
 
 	t.Run("no hint", func(t *testing.T) {
-		got := quotaResetHint(&http.Response{Header: make(http.Header)}, `{"error":{"message":"quota exhausted"}}`)
+		got := quotaResetHint(&http.Response{Header: make(http.Header)}, `{"error":{"message":"quota exhausted"}}`, maxCD)
 		if got != 0 {
 			t.Errorf("hint = %v, want 0", got)
 		}
@@ -176,26 +178,70 @@ func TestQuotaResetHint(t *testing.T) {
 // A quota 429 must park the key on the escalating ladder, not the flat 60s.
 func TestQuotaExhaustionBackoffLadder(t *testing.T) {
 	state := NewState()
-	first := state.PenalizeQuota("ch", "sk-key", 0)
+	base, max := quotaBaseCooldown, quotaMaxCooldown
+	first := state.PenalizeQuota("ch", "sk-key", 0, base, max)
 	if first < 4*time.Minute || first > 6*time.Minute {
 		t.Fatalf("first strike = %v, want ~5m", first)
 	}
-	second := state.PenalizeQuota("ch", "sk-key", 0)
+	second := state.PenalizeQuota("ch", "sk-key", 0, base, max)
 	if second < 8*time.Minute || second > 12*time.Minute {
 		t.Fatalf("second strike = %v, want ~10m (escalated)", second)
 	}
 
 	// An explicit reset hint wins over the ladder.
-	hinted := state.PenalizeQuota("ch", "sk-key2", 2*time.Hour)
+	hinted := state.PenalizeQuota("ch", "sk-key2", 2*time.Hour, base, max)
 	if hinted < 96*time.Minute || hinted > 144*time.Minute {
 		t.Fatalf("hinted = %v, want ~2h (reset hint honored with jitter)", hinted)
 	}
 
 	// Success (half-open probe) resets the strike count.
 	state.ResetQuota("ch", "sk-key")
-	again := state.PenalizeQuota("ch", "sk-key", 0)
+	again := state.PenalizeQuota("ch", "sk-key", 0, base, max)
 	if again < 4*time.Minute || again > 6*time.Minute {
 		t.Fatalf("after reset = %v, want ~5m (ladder restarted)", again)
+	}
+}
+
+// A channel's own cooldown settings must reach the ladder: a short
+// quota_base means the exhausted key is retried soon rather than after the
+// generic 5m (e.g. an RPS bucket that refills in ~2s).
+func TestPenalizeQuotaHonorsChannelCooldowns(t *testing.T) {
+	state := NewState()
+	first := state.PenalizeQuota("ch", "sk-key", 0, 5*time.Second, 5*time.Minute)
+	if first < 4*time.Second || first > 6*time.Second {
+		t.Fatalf("first strike = %v, want ~5s (channel base)", first)
+	}
+	// The second strike escalates from the channel base, not the built-in.
+	second := state.PenalizeQuota("ch", "sk-key", 0, 5*time.Second, 5*time.Minute)
+	if second < 8*time.Second || second > 12*time.Second {
+		t.Fatalf("second strike = %v, want ~10s (escalated from channel base)", second)
+	}
+	// A reset hint above the channel max is capped by it.
+	hinted := state.PenalizeQuota("ch", "sk-key", 2*time.Hour, 5*time.Second, 5*time.Minute)
+	if hinted < 4*time.Minute || hinted > 6*time.Minute {
+		t.Fatalf("hinted = %v, want ~5m (capped at channel max)", hinted)
+	}
+}
+
+// A transient RPS 429 ("rps exhausted") must respect the channel's short
+// rate_limit instead of the global 60s default: the bucket refills in ~2s,
+// so parking a minute wastes the key.
+func TestRPSExhaustedUsesShortChannelCooldown(t *testing.T) {
+	cd := config.Cooldowns{RateLimit: config.Duration(5 * time.Second)}
+	_, cooldown, _ := classifyUpstream(&http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     make(http.Header),
+	}, `{"error":{"message":"rps exhausted","type":"quota_exceeded_error","code":"8"}}`, cd)
+	if cooldown != 5*time.Second {
+		t.Fatalf("cooldown = %v, want 5s (channel rate_limit)", cooldown)
+	}
+	// Without an override the same body keeps the built-in 60s default.
+	_, builtin, _ := classifyUpstream(&http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Header:     make(http.Header),
+	}, `{"error":{"message":"rps exhausted"}}`, config.BuiltinCooldowns())
+	if builtin != quotaCooldown {
+		t.Fatalf("builtin cooldown = %v, want %v", builtin, quotaCooldown)
 	}
 }
 
@@ -206,7 +252,7 @@ func TestQuotaCooldownPersistence(t *testing.T) {
 
 	state := NewState()
 	state.SetPersistence(path)
-	state.PenalizeQuota("ch", "sk-persisted", time.Hour)
+	state.PenalizeQuota("ch", "sk-persisted", time.Hour, quotaBaseCooldown, quotaMaxCooldown)
 	state.Penalize("ch", "sk-short", time.Minute) // rate limit: NOT persisted
 
 	raw, err := os.ReadFile(path)

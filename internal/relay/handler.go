@@ -17,17 +17,20 @@ import (
 	"github.com/local/relayhub/internal/stats"
 )
 
-// Cooldown durations applied when an upstream rejects a specific key.
-const (
-	authCooldown  = 10 * time.Minute // 401/403: key is bad or revoked
-	quotaCooldown = 60 * time.Second // 429: rate limited, retry soon
+// Cooldown durations applied when an upstream rejects a specific key. The
+// values come from config.BuiltinCooldowns() so an unconfigured channel
+// behaves exactly like the historical constants; per-channel/server
+// cooldowns override them at request time (see attempt.cooldowns).
+var (
+	authCooldown  = config.BuiltinCooldowns().Auth.D()      // 401/403: key is bad or revoked
+	quotaCooldown = config.BuiltinCooldowns().RateLimit.D() // 429: rate limited, retry soon
 	// maxRetryAfter caps an upstream Retry-After hint so a hostile or buggy
 	// "retry in 24h" cannot pin a key out of rotation for a day.
-	maxRetryAfter = 10 * time.Minute
-
-	// maxRequestBody caps incoming client request bodies (32 MiB).
-	maxRequestBody = 32 << 20
+	maxRetryAfter = config.BuiltinCooldowns().MaxRetryAfter.D()
 )
+
+// maxRequestBody caps incoming client request bodies (32 MiB).
+const maxRequestBody = 32 << 20
 
 // ConfigSource abstracts the live config so the handler always sees the
 // latest channels and the master enable switch.
@@ -366,6 +369,9 @@ type attempt struct {
 	// caller requested, kept so the response can echo the client's name back.
 	upstreamModel string
 	clientModel   string
+	// cooldowns are the fully-resolved cool-down durations for this
+	// channel (channel override → server override → built-in defaults).
+	cooldowns config.Cooldowns
 }
 
 // buildAttempts expands every candidate channel into per-key attempts,
@@ -390,12 +396,14 @@ func (h *Handler) buildAttempts(snapshot *config.Config, model string, openAIOnl
 			continue
 		}
 		upstreamModel := channel.UpstreamModel(model)
+		cooldowns := config.EffectiveCooldowns(snapshot.Server.Cooldowns, channel.Cooldowns)
 		for _, apiKey := range h.state.OrderedKeys(channel, snapshot.Server.KeyStrategy) {
 			attempts = append(attempts, attempt{
 				channel:       channel,
 				apiKey:        apiKey,
 				upstreamModel: upstreamModel,
 				clientModel:   model,
+				cooldowns:     cooldowns,
 			})
 		}
 	}
@@ -436,9 +444,13 @@ type attemptResult struct {
 // dead upstream stops absorbing every request before failover kicks in.
 func (h *Handler) handleUpstreamError(response *http.Response, attempt attempt) attemptResult {
 	reason := readErrorBody(response)
-	outcome, cooldown, message := classifyUpstream(response, reason)
+	cd := attempt.cooldowns
+	outcome, cooldown, message := classifyUpstream(response, reason, cd)
 	if cooldown == cooldownUseQuotaBackoff {
-		applied := h.state.PenalizeQuota(attempt.channel.Name, attempt.apiKey, quotaResetHint(response, reason))
+		applied := h.state.PenalizeQuota(
+			attempt.channel.Name, attempt.apiKey,
+			quotaResetHint(response, reason, cd.QuotaMax.D()),
+			cd.QuotaBase.D(), cd.QuotaMax.D())
 		h.stats.PushEvent("warn", attempt.channel.Name,
 			fmt.Sprintf("key ...%s quota exhausted, parked for %s", tail(attempt.apiKey, 4), applied.Round(time.Second)))
 	} else if cooldown > 0 {
@@ -550,16 +562,17 @@ const cooldownUseQuotaBackoff = time.Duration(-1)
 // classifyUpstream decides what to do with a non-200 upstream response and
 // how long to cool the offending key down. For 429 it distinguishes a
 // transient rate limit (honor Retry-After / short default) from quota
-// exhaustion (backoff ladder) by inspecting the error body.
-func classifyUpstream(response *http.Response, body string) (outcomeKind, time.Duration, string) {
+// exhaustion (backoff ladder) by inspecting the error body. Cooldown
+// durations come from the attempt's resolved channel config.
+func classifyUpstream(response *http.Response, body string, cd config.Cooldowns) (outcomeKind, time.Duration, string) {
 	switch response.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return outcomeFailed, authCooldown, fmt.Sprintf("upstream auth rejected (%d)", response.StatusCode)
+		return outcomeFailed, cd.Auth.D(), fmt.Sprintf("upstream auth rejected (%d)", response.StatusCode)
 	case http.StatusTooManyRequests:
 		if isQuotaExhausted(response, body) {
 			return outcomeFailed, cooldownUseQuotaBackoff, "upstream quota exhausted (429)"
 		}
-		cooldown := retryAfterDuration(response)
+		cooldown := retryAfterDuration(response, cd)
 		message := "upstream rate limited (429)"
 		if cooldown > 0 {
 			message += fmt.Sprintf(", retry after %s", cooldown.Round(time.Second))
@@ -570,6 +583,16 @@ func classifyUpstream(response *http.Response, body string) (outcomeKind, time.D
 	default:
 		return outcomeFailed, 0, fmt.Sprintf("unexpected upstream status (%d)", response.StatusCode)
 	}
+}
+
+// rateExhaustedKeywords are transient window-exhaustion phrases (RPS/QPS/
+// RPM) whose window refills in seconds. They must be checked BEFORE quota
+// markers because some upstreams (SenseNova) tag these errors with a
+// "quota_exceeded_error" type even though the RPS bucket recovers almost
+// immediately — a long quota parking would waste the key.
+var rateExhaustedKeywords = []string{
+	"rps exhausted", "qps exhausted", "rpm exhausted",
+	"requests exhausted", "request rate exhausted",
 }
 
 // quotaKeywords mark a 429 as quota exhaustion (a billing/token-per-minute
@@ -593,13 +616,20 @@ var rateKeywords = []string{
 	"rate limit", "ratelimit", "qps", "rpm", "tpm", "concurrent", "too many requests",
 }
 
-// isQuotaExhausted classifies a 429 body. An explicit quota/exhaustion
-// marker wins (the window must refill, so the key is parked on the backoff
-// ladder rather than retried after a short cooldown); an explicit rate-limit
-// marker without one means transient; an unclassified 429 stays a (short)
-// rate limit so we keep retrying soon.
+// isQuotaExhausted classifies a 429 body. A transient window-exhaustion
+// phrase (rps/qps exhausted) wins immediately: those refill in seconds.
+// Otherwise an explicit quota/exhaustion marker wins (the window must
+// refill, so the key is parked on the backoff ladder rather than retried
+// after a short cooldown); an explicit rate-limit marker without one means
+// transient; an unclassified 429 stays a (short) rate limit so we keep
+// retrying soon.
 func isQuotaExhausted(response *http.Response, body string) bool {
 	lower := strings.ToLower(body)
+	for _, keyword := range rateExhaustedKeywords {
+		if strings.Contains(lower, keyword) {
+			return false
+		}
+	}
 	for _, keyword := range quotaKeywords {
 		if strings.Contains(lower, keyword) {
 			return true
@@ -617,12 +647,14 @@ func isQuotaExhausted(response *http.Response, body string) bool {
 // key can be parked exactly until then instead of guessing with backoff.
 // Sources, in order: dedicated reset headers (epoch seconds or a duration),
 // a reset timestamp inside the JSON error body. 0 means "unknown".
-func quotaResetHint(response *http.Response, body string) time.Duration {
+// maxCooldown caps the returned duration so a reset hint pointing weeks out
+// cannot pin the key beyond the channel's quota ceiling.
+func quotaResetHint(response *http.Response, body string, maxCooldown time.Duration) time.Duration {
 	for _, name := range []string{
 		"X-Quota-Reset", "X-Ratelimit-Reset-Quota", "X-Ratelimit-Reset",
 		"X-Ratelimit-Reset-Requests", "Quota-Reset",
 	} {
-		if duration, ok := parseResetValue(response.Header.Get(name)); ok {
+		if duration, ok := parseResetValue(response.Header.Get(name), maxCooldown); ok {
 			return duration
 		}
 	}
@@ -639,7 +671,7 @@ func quotaResetHint(response *http.Response, body string) time.Duration {
 			continue
 		}
 		for _, field := range []string{"reset_at", "resetAt", "quotaResetTimeStamp", "quota_reset_at"} {
-			if duration, ok := parseResetAny(object[field]); ok {
+			if duration, ok := parseResetAny(object[field], maxCooldown); ok {
 				return duration
 			}
 		}
@@ -648,27 +680,27 @@ func quotaResetHint(response *http.Response, body string) time.Duration {
 }
 
 // parseResetAny accepts a JSON number or numeric string.
-func parseResetAny(value any) (time.Duration, bool) {
+func parseResetAny(value any, maxCooldown time.Duration) (time.Duration, bool) {
 	switch typed := value.(type) {
 	case float64:
-		return parseResetNumber(typed)
+		return parseResetNumber(typed, maxCooldown)
 	case string:
-		return parseResetValue(typed)
+		return parseResetValue(typed, maxCooldown)
 	}
 	return 0, false
 }
 
 // parseResetValue interprets a reset hint: an epoch timestamp (seconds or
 // milliseconds) becomes time.Until, a small number is treated as a
-// duration in seconds.
-func parseResetValue(raw string) (time.Duration, bool) {
+// duration in seconds (capped at maxCooldown like the quota ladder).
+func parseResetValue(raw string, maxCooldown time.Duration) (time.Duration, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return 0, false
 	}
 	if when, err := http.ParseTime(raw); err == nil {
 		if until := time.Until(when); until > 0 {
-			return until, true
+			return min(until, maxCooldown), true
 		}
 		return 0, false
 	}
@@ -676,20 +708,20 @@ func parseResetValue(raw string) (time.Duration, bool) {
 	if err != nil || number <= 0 {
 		return 0, false
 	}
-	return parseResetNumber(number)
+	return parseResetNumber(number, maxCooldown)
 }
 
-func parseResetNumber(number float64) (time.Duration, bool) {
+func parseResetNumber(number float64, maxCooldown time.Duration) (time.Duration, bool) {
 	switch {
 	case number > 1e12: // epoch milliseconds
 		if until := time.Until(time.UnixMilli(int64(number))); until > 0 {
-			return until, true
+			return min(until, maxCooldown), true
 		}
 	case number > 1e9: // epoch seconds
 		if until := time.Until(time.Unix(int64(number), 0)); until > 0 {
-			return until, true
+			return min(until, maxCooldown), true
 		}
-	case number < float64(quotaMaxCooldown/time.Second):
+	case number < float64(maxCooldown/time.Second):
 		return time.Duration(number * float64(time.Second)), true
 	}
 	return 0, false
@@ -697,17 +729,19 @@ func parseResetNumber(number float64) (time.Duration, bool) {
 
 // retryAfterDuration parses the Retry-After header (delta-seconds or
 // HTTP-date, per RFC 9110) into a cooldown. Missing, invalid or out-of-range
-// values fall back to the default quotaCooldown so a bad header can never
-// pin a key out of rotation indefinitely.
-func retryAfterDuration(response *http.Response) time.Duration {
+// values fall back to the channel's rate-limit default so a bad header can
+// never pin a key out of rotation indefinitely.
+func retryAfterDuration(response *http.Response, cd config.Cooldowns) time.Duration {
+	rateLimit := cd.RateLimit.D()
+	maxRetryAfter := cd.MaxRetryAfter.D()
 	header := response.Header.Get("Retry-After")
 	if header == "" {
-		return quotaCooldown
+		return rateLimit
 	}
 
 	if seconds, err := strconv.Atoi(header); err == nil {
 		if seconds <= 0 {
-			return quotaCooldown
+			return rateLimit
 		}
 		cooldown := time.Duration(seconds) * time.Second
 		if cooldown > maxRetryAfter {
@@ -719,7 +753,7 @@ func retryAfterDuration(response *http.Response) time.Duration {
 	if when, err := http.ParseTime(header); err == nil {
 		cooldown := time.Until(when)
 		if cooldown <= 0 {
-			return quotaCooldown
+			return rateLimit
 		}
 		if cooldown > maxRetryAfter {
 			cooldown = maxRetryAfter
@@ -727,7 +761,7 @@ func retryAfterDuration(response *http.Response) time.Duration {
 		return cooldown
 	}
 
-	return quotaCooldown
+	return rateLimit
 }
 
 func readErrorBody(response *http.Response) string {

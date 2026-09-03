@@ -1,10 +1,12 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -28,6 +30,116 @@ const (
 	KeyStrategyPreferredFirst = "preferred_first"
 )
 
+// Duration is a time.Duration that YAML-/JSON-encodes as a Go duration
+// string ("5s", "1m30s") instead of raw nanoseconds, so config files stay
+// human-readable. The zero value means "inherited", not zero duration.
+type Duration time.Duration
+
+// D returns the underlying duration.
+func (d Duration) D() time.Duration { return time.Duration(d) }
+
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// UnmarshalYAML accepts a Go duration string like "5s" or "1m30s".
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
+	parsed, err := time.ParseDuration(value.Value)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", value.Value, err)
+	}
+	if parsed < 0 {
+		return fmt.Errorf("cooldown must not be negative: %q", value.Value)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+func (d Duration) MarshalYAML() (any, error) { return time.Duration(d).String(), nil }
+
+// UnmarshalJSON accepts the same duration string, e.g. from the admin API.
+func (d *Duration) UnmarshalJSON(raw []byte) error {
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return fmt.Errorf("cooldown must be a duration string like \"5s\": %w", err)
+	}
+	parsed, err := time.ParseDuration(text)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", text, err)
+	}
+	if parsed < 0 {
+		return fmt.Errorf("cooldown must not be negative: %q", text)
+	}
+	*d = Duration(parsed)
+	return nil
+}
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+// Cooldowns tunes how long an offending key rests before being retried.
+// Zero fields mean "inherit": the channel's Cooldowns override the
+// server-level Cooldowns, which override the built-in defaults. Per-channel
+// tuning matters because upstreams behave very differently — a gateway that
+// refills an RPS bucket in ~2s wastes capacity if its key sleeps for the
+// generic 60s, while an account that exhausted a 5h quota window needs the
+// long escalating ladder, not a flat minute.
+type Cooldowns struct {
+	// RateLimit is the cooldown applied to a transient 429 (QPS/RPM/TPM)
+	// when the upstream sends no usable Retry-After. Default 60s.
+	RateLimit Duration `yaml:"rate_limit,omitempty" json:"rate_limit,omitempty"`
+	// QuotaBase is the first strike of the quota-exhaustion backoff ladder
+	// (doubles per consecutive strike). Default 5m.
+	QuotaBase Duration `yaml:"quota_base,omitempty" json:"quota_base,omitempty"`
+	// QuotaMax caps the quota ladder and any upstream quota-reset hint.
+	// Default 5h.
+	QuotaMax Duration `yaml:"quota_max,omitempty" json:"quota_max,omitempty"`
+	// Auth is the cooldown for a 401/403 (bad or revoked key). Default 10m.
+	Auth Duration `yaml:"auth,omitempty" json:"auth,omitempty"`
+	// MaxRetryAfter caps an upstream Retry-After hint so a hostile or buggy
+	// "retry in 24h" cannot pin a key out of rotation for a day.
+	// Default 10m.
+	MaxRetryAfter Duration `yaml:"max_retry_after,omitempty" json:"max_retry_after,omitempty"`
+}
+
+// BuiltinCooldowns are the fallbacks used when neither the channel nor the
+// server configures a value. They mirror the relay package's original
+// constants so an empty config behaves exactly as before.
+func BuiltinCooldowns() Cooldowns {
+	return Cooldowns{
+		RateLimit:     Duration(60 * time.Second),
+		QuotaBase:     Duration(5 * time.Minute),
+		QuotaMax:      Duration(5 * time.Hour),
+		Auth:          Duration(10 * time.Minute),
+		MaxRetryAfter: Duration(10 * time.Minute),
+	}
+}
+
+// fillInherited replaces zero fields with defaults from the given level.
+func (c Cooldowns) fillInherited(upper Cooldowns) Cooldowns {
+	if c.RateLimit == 0 {
+		c.RateLimit = upper.RateLimit
+	}
+	if c.QuotaBase == 0 {
+		c.QuotaBase = upper.QuotaBase
+	}
+	if c.QuotaMax == 0 {
+		c.QuotaMax = upper.QuotaMax
+	}
+	if c.Auth == 0 {
+		c.Auth = upper.Auth
+	}
+	if c.MaxRetryAfter == 0 {
+		c.MaxRetryAfter = upper.MaxRetryAfter
+	}
+	return c
+}
+
+// EffectiveCooldowns resolves the three-level inheritance chain for a
+// channel: channel override, then server override, then built-in defaults.
+func EffectiveCooldowns(server, channel Cooldowns) Cooldowns {
+	return channel.fillInherited(server.fillInherited(BuiltinCooldowns()))
+}
+
 type Server struct {
 	Listen string `yaml:"listen" json:"listen"`
 	// Optional: clients must present this as Bearer token. Empty means no auth.
@@ -44,6 +156,9 @@ type Server struct {
 	// the first key first, fail over only on error / cooldown (better
 	// upstream cache affinity).
 	KeyStrategy string `yaml:"key_strategy,omitempty" json:"key_strategy,omitempty"`
+	// Cooldowns are the server-level defaults for key cool-down behavior;
+	// individual channels override them per channel. See effectiveCooldowns.
+	Cooldowns Cooldowns `yaml:"cooldowns,omitempty" json:"cooldowns,omitempty"`
 	// nil means enabled; the admin console can flip it at runtime and persist here.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
@@ -90,9 +205,13 @@ type Channel struct {
 	// request, e.g. {"X-Title": "proxy"} for gateways that require a
 	// title, or a different User-Agent. Authorization and Content-Type are
 	// the proxy's own and cannot be overridden this way.
-	Headers  map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Priority int               `yaml:"priority" json:"priority"`
-	Enabled  *bool             `yaml:"enabled,omitempty" json:"enabled,omitempty"` // nil means enabled
+	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	// Cooldowns override the server-level cooldown defaults for THIS
+	// channel, e.g. a gateway whose RPS bucket refills in seconds can set
+	// rate_limit: 5s instead of inheriting the global 60s.
+	Cooldowns Cooldowns `yaml:"cooldowns,omitempty" json:"cooldowns,omitempty"`
+	Priority  int       `yaml:"priority" json:"priority"`
+	Enabled   *bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"` // nil means enabled
 }
 
 // UpstreamModel returns the model name this channel's upstream actually

@@ -187,19 +187,21 @@ func (s *State) Penalize(channelName, apiKey string, duration time.Duration) {
 }
 
 // Quota backoff ladder: consecutive quota strikes park the key longer and
-// longer so an exhausted 5h window is probed sparsely instead of hammered
-// every minute. Capped at quotaMaxCooldown; ±20% jitter spreads the
-// wake-up so all keys do not probe the upstream at the same instant.
-const (
-	quotaBaseCooldown = 5 * time.Minute
-	quotaMaxCooldown  = 5 * time.Hour
+// longer so an exhausted quota window is probed sparsely instead of
+// hammered every minute. Capped at quotaMaxCooldown; ±20% jitter spreads
+// the wake-up so all keys do not probe the upstream at the same instant.
+// Both values come from config.BuiltinCooldowns() — a channel can override
+// them per channel via its cooldowns settings.
+var (
+	quotaBaseCooldown = config.BuiltinCooldowns().QuotaBase.D()
+	quotaMaxCooldown  = config.BuiltinCooldowns().QuotaMax.D()
 )
 
 // PenalizeQuota parks a quota-exhausted key. When the upstream told us
-// when the window resets (resetHint > 0) that hint wins; otherwise the
-// key escalates through the backoff ladder based on its strike count.
-// The applied duration is returned for logging.
-func (s *State) PenalizeQuota(channelName, apiKey string, resetHint time.Duration) time.Duration {
+// when the window resets (resetHint > 0) that hint wins (capped at max);
+// otherwise the key escalates through the backoff ladder from base, based
+// on its strike count. The applied duration is returned for logging.
+func (s *State) PenalizeQuota(channelName, apiKey string, resetHint time.Duration, base, max time.Duration) time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -210,14 +212,18 @@ func (s *State) PenalizeQuota(channelName, apiKey string, resetHint time.Duratio
 	entry.kind = cooldownQuota
 	entry.attempts++
 
+	if base <= 0 || max <= 0 {
+		base = quotaBaseCooldown
+		max = quotaMaxCooldown
+	}
 	duration := resetHint
 	if duration <= 0 {
-		duration = quotaBaseCooldown << min(entry.attempts-1, 6)
-		if duration > quotaMaxCooldown {
-			duration = quotaMaxCooldown
+		duration = base << min(entry.attempts-1, 6)
+		if duration > max {
+			duration = max
 		}
-	} else if duration > quotaMaxCooldown {
-		duration = quotaMaxCooldown
+	} else if duration > max {
+		duration = max
 	}
 	// ±20% jitter.
 	jitter := 1 + (rand.Float64()-0.5)*0.4
